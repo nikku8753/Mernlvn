@@ -1,0 +1,18 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: codesync
+      POSTGRES_PASSWORD: codesync
+      POSTGRES_DB: codesync
+    ports:
+      - "5432:5432"
+    volumes:
+      - codesync-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codesync"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+volumes:
+  codesync-db:

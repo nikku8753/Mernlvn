@@ -1,0 +1,99 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+}
+enum Role {
+  OWNER
+  EDITOR
+  VIEWER
+}
+enum FileType {
+  FILE
+  FOLDER
+}
+model User {
+  id String @id @default(cuid())
+  username String
+  email String @unique
+  passwordHash String
+  avatar String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  sessions Session[]
+  owned Workspace[]
+  memberships WorkspaceMember[]
+  messages Message[]
+  invites WorkspaceInvite[]
+}
+model Session {
+  id String @id
+  userId String
+  expiresAt DateTime
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+  @@index([expiresAt])
+}
+model Workspace {
+  id String @id @default(cuid())
+  name String
+  language String
+  ownerId String
+  owner User @relation(fields: [ownerId], references: [id])
+  members WorkspaceMember[]
+  files File[]
+  messages Message[]
+  invites WorkspaceInvite[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([ownerId, updatedAt])
+}
+model WorkspaceMember {
+  workspaceId String
+  userId String
+  role Role @default(EDITOR)
+  joinedAt DateTime @default(now())
+  lastOpenedAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([workspaceId, userId])
+  @@index([userId, lastOpenedAt])
+}
+model File {
+  id String @id @default(cuid())
+  workspaceId String
+  parentId String?
+  name String
+  type FileType @default(FILE)
+  content String @default("")
+  state Bytes?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  parent File? @relation("FileTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children File[] @relation("FileTree")
+  @@index([workspaceId, parentId])
+}
+model Message {
+  id String @id @default(cuid())
+  workspaceId String
+  userId String
+  message String
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+  @@index([workspaceId, createdAt])
+}
+model WorkspaceInvite {
+  id String @id @default(cuid())
+  workspaceId String
+  invitedBy String
+  token String @unique
+  role Role @default(EDITOR)
+  expiresAt DateTime
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  inviter User @relation(fields: [invitedBy], references: [id])
+  @@index([workspaceId])
+}
