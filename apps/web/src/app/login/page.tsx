@@ -1,2 +1,7 @@
-import {PhaseNotice} from '@/components/phase-notice';
-export default function Login(){return <PhaseNotice title="Sign in to CodeSync" phase="Phase 2: Authentication"/>;}
+import { redirect } from 'next/navigation';
+import { AuthForm } from '@/components/auth-form';
+import { currentUser } from '@/lib/session';
+export default async function Login() {
+  if (await currentUser()) redirect('/dashboard');
+  return <AuthForm mode="login" />;
+}

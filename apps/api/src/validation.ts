@@ -1,8 +1,10 @@
 import { z } from 'zod';
 export const languages = ['javascript','typescript','python','java','cpp','c'] as const;
-export const registerSchema = z.object({ username: z.string().trim().min(2).max(32), email: z.email().max(254).transform(v=>v.toLowerCase()), password: z.string().min(10).max(72) });
+export const profileSchema = z.object({ username: z.string().trim().min(2).max(32) });
+export const registerSchema = profileSchema.extend({ email: z.string().trim().pipe(z.email().max(254)).transform(v=>v.toLowerCase()), password: z.string().min(10).max(72).refine(v=>Buffer.byteLength(v,'utf8')<=72,'Password must be at most 72 UTF-8 bytes.') });
 export const loginSchema = registerSchema.pick({email:true,password:true});
-export const workspaceSchema = z.object({ name: z.string().trim().min(1).max(80), language: z.enum(languages) });
+export const workspaceIdSchema = z.cuid('Invalid workspace ID.');
+export const workspaceSchema = z.object({ name: z.string().trim().min(1,'Workspace name is required.').max(80,'Workspace name must be at most 80 characters.'), language: z.enum(languages).default('javascript') }).strict();
 export const filename = z.string().trim().min(1).max(100).regex(/^[\w. -]+$/, 'Use letters, numbers, spaces, dots, dashes, or underscores').refine(v=>v!=='.'&&v!=='..');
 export const fileSchema = z.object({name:filename, type:z.enum(['FILE','FOLDER']).default('FILE'),parentId:z.string().min(1).nullable().default(null)});
 export const messageSchema = z.object({message:z.string().trim().min(1).max(2000)});

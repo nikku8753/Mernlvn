@@ -4,7 +4,7 @@ A portfolio project for a real-time collaborative development workspace. Request
 
 ## Current checkpoint
 
-**Phase 1 implementation is ready for verification.** The repository includes the monorepo setup, responsive landing page, relational Prisma schema, environment examples, and local PostgreSQL configuration. Authentication, workspace, and collaboration backend modules were drafted before the phased requirement arrived; they are **unverified scaffolding**, not completed product features. The login, registration, and dashboard routes explain this development status rather than using fake accounts or hardcoded workspace data.
+**Phases 1–3 are complete and locally verified.** Authentication, profile editing, and the protected dashboard use the existing Express cookie-session architecture. Phase 3 adds real PostgreSQL-backed workspace creation, dashboard cards, workspace details, owner-only rename, and confirmed deletion. File/editor, collaboration, sharing, and execution modules remain **unverified scaffolding**, not completed product features. The workspace page explicitly defers the editor to Phase 4.
 
 Do not present this checkpoint as a finished collaborative editor. No cloud services have been provisioned or deployed.
 
@@ -12,9 +12,9 @@ Do not present this checkpoint as a finished collaborative editor. No cloud serv
 
 | Phase | Scope | Status |
 | --- | --- | --- |
-| 1 | Project setup, database, landing page | Implemented; dependency/build/database verification pending |
-| 2 | Authentication, profile, dashboard | Backend draft; frontend pending |
-| 3 | Workspace creation and persistence | Backend draft; frontend pending |
+| 1 | Project setup, database, landing page | Completed; working locally |
+| 2 | Authentication, profile, dashboard | Completed; typecheck, build, database and auth/route integration checks passed |
+| 3 | Workspace creation and persistence | Completed; CRUD, authorization, persistence/restart, regression tests and build passed |
 | 4 | Monaco integration and file explorer | File API draft; frontend pending |
 | 5 | Socket.IO and Yjs synchronization | Backend draft; integration testing pending |
 | 6 | Presence and live cursors | Socket event draft; frontend pending |
@@ -39,7 +39,7 @@ apps/
     src/auth.ts              Opaque cookie sessions
     src/permissions.ts       Server authorization
     src/validation.ts        Zod validation
-    src/app.ts               Express REST endpoints (draft)
+    src/app.ts               Express REST (auth/workspaces verified; later endpoints draft)
     src/realtime.ts          Socket.IO events (draft)
     src/documents.ts         Yjs document lifecycle (draft)
     src/execution.ts         Isolated runner adapter (draft)
@@ -55,7 +55,7 @@ Draft socket payloads carry validated positions for cursors; relative CRDT curso
 
 | Entity | Purpose |
 | --- | --- |
-| User | Username, unique email, password hash, optional avatar, timestamps |
+| User | Unique username and email, password hash, optional avatar, timestamps |
 | Session | Hashed token, user foreign key, expiration |
 | Workspace | Name, editing language, owner, timestamps |
 | WorkspaceMember | Composite workspace/user key, role, joined/opened dates |
@@ -83,7 +83,7 @@ npm run build
 npm run dev
 ```
 
-If using a local/cloud PostgreSQL installation instead of Docker, set `DATABASE_URL` accordingly and omit the Docker command. An initial SQL migration is committed; it has not been applied in this environment. `npm run db:migrate` creates subsequent development migrations; check generated SQL into version control. Production uses `npm run db:deploy -w @codesync/api`, never `migrate dev`.
+If using a local/cloud PostgreSQL installation instead of Docker, set `DATABASE_URL` accordingly and omit the Docker command. The initial migration and Phase 2 username uniqueness migration have been applied locally. `npm run db:migrate` creates subsequent development migrations; check generated SQL into version control. Production uses `npm run db:deploy -w @codesync/api`, never `migrate dev`. The username migration deliberately fails if an existing database contains duplicate usernames; resolve those account names before applying it. On Windows, stop the API before regenerating Prisma Client if its engine DLL is locked. If PowerShell blocks `npm.ps1`, use `npm.cmd` for these commands.
 
 Frontend: `http://localhost:3000`. API: `http://localhost:4000`. `/health` checks the database connection. The frontend landing page can run without the API/database using `npm run dev -w @codesync/web`.
 
@@ -102,7 +102,61 @@ Frontend: `http://localhost:3000`. API: `http://localhost:4000`. `/health` check
 
 No secret belongs in a `NEXT_PUBLIC_` variable. Environment files are ignored by Git.
 
-## Planned APIs (draft implementation)
+## Phase 2 verification
+
+Verified on the local Docker PostgreSQL database with the frontend at `http://localhost:3000` and API at `http://localhost:4000`:
+
+- `npm run typecheck`: both workspaces passed.
+- `npm run build`: Express TypeScript and Next.js production builds passed.
+- Prisma Client generation, schema validation, and both committed migrations succeeded; migration status reports the database is up to date.
+- `npm test`: the Phase 2 integration suite passed registration, server validation constraints, duplicate email/username conflicts, valid/invalid login, `GET /api/auth/me`, username editing and conflicts, logout, invalid/expired sessions, Origin rejection, bcrypt password storage, hashed session storage, seven-day expiry, and HttpOnly/SameSite cookie checks.
+- Real HTTP checks passed: anonymous dashboard access redirects to login; authenticated dashboard renders username/email; authenticated login/register redirect to dashboard; dashboard access after logout redirects to login. API `/health` and frontend `/login` returned 200.
+
+To rerun the integration suite, start PostgreSQL, apply migrations, and run **both** local services with `npm run dev` before running `npm test` in another terminal. Tests create unique temporary accounts in the configured database and delete only those accounts afterward. Run against a local development database. These are API and server-rendered route tests; interactive browser automation and visual/device testing have not been performed.
+
+Registration validates username (2–32 characters), email, password (10–72 characters and at most 72 UTF-8 bytes), and matching confirmation in the frontend. The API independently validates persisted fields and enforces unique usernames/emails in PostgreSQL. Successful registration signs the user in immediately. Profile editing changes the username; email is displayed read-only, matching the existing API design.
+
+Next.js forwards the incoming session cookie to Express `GET /api/auth/me` on protected route requests. Browser requests include credentials, and the dashboard rechecks the session on mount, focus, visibility changes, and every minute. Authentication failures redirect to login; service outages show an error. No auth tokens are stored in localStorage and no secrets are exposed through frontend environment variables.
+
+## Phase 3 implementation and verification
+
+Phase 3 reuses the existing `Workspace` and `WorkspaceMember` models. **No schema change or new migration was needed.** A workspace has its existing name, language, owner, and timestamps; the schema has no description field. Creation uses an atomic Prisma nested write to create both the workspace and its creator's `OWNER` membership. Language defaults to JavaScript when omitted and is selectable during creation. Rename updates the name only. Workspaces do not seed files in this phase.
+
+All five workspace endpoints require the existing authenticated session. Listings are filtered by membership. Details require membership, and rename/delete require the `OWNER` role. Nonmembers receive 403, missing workspaces 404, invalid IDs or request bodies 400, and missing/expired sessions 401. Strict schemas reject unknown create/update fields, including client-provided `userId` or `ownerId`. Names are trimmed, required, and limited to 80 characters. Responses are not cached. Existing Origin protection remains in force. Deletion uses the existing cascading relations to remove membership, file, message, and invite records.
+
+The dashboard retains profile editing and logout, and adds loading/error/retry states, workspace cards with role/owner/date information, an empty state, and creation links. `/workspace/new` provides validated creation with a language selector. `/workspace/[id]` verifies the session and access through Express before rendering details. Owner controls provide rename feedback and an inline delete confirmation with cancel. Successful creation opens the workspace; deletion returns to the dashboard. Browser data comes from credentialed API requests, never localStorage. Workspace pages recheck access on mount/focus and every minute.
+
+Verification performed:
+
+- `npm.cmd run typecheck` and `npm.cmd run build`: passed for API and web.
+- `npm.cmd exec -w @codesync/api -- prisma validate`: passed.
+- `npm.cmd run db:generate`: passed after briefly stopping the API to release its Windows engine DLL; API restarted afterward.
+- `npm.cmd exec -w @codesync/api -- prisma migrate status`: both existing migrations applied; database up to date.
+- `git diff --check`: passed.
+- `npm.cmd test`: both Phase 2 and Phase 3 integration suites passed. Phase 3 covers create/list/details/rename/delete, name/language/ID/JSON validation, rejected ownership injection, Origin protection, database owner membership, unauthorized/expired authentication behavior (Phase 2 regression), nonmember denial, editor/viewer read-only permissions, actual workspace page rendering/access denial, refresh reads, logout/login persistence, a real separate API process stop/restart with persisted session and workspace, and deletion cascades.
+
+The first sandboxed restart test failed because Windows user-info lookup in `tsx` returned `ENOMEM`; running the same suite outside the sandbox passed. Tests launch and stop their own temporary API process on a free port and clean up only uniquely named test accounts/workspaces. Start the normal frontend and API, plus PostgreSQL, before running `npm test`. No interactive browser automation or visual/device testing has been performed. Workspace descriptions, language updates, pagination, and all Phase 4+ features remain outside this implementation.
+
+### Manual browser verification
+
+1. Run `npm.cmd run dev` with PostgreSQL running. Open `http://localhost:3000`, register/login as User A, and confirm the dashboard/profile/logout still work.
+2. Click **Create Workspace**. Try a spaces-only name; expect a validation error. Enter `Phase 3 browser test`, select TypeScript, and submit. Expect the workspace detail page with User A as owner and role `OWNER`.
+3. Go back to the dashboard. Confirm a card with the name, role, language, owner, and updated date. Open it and refresh; all workspace details must remain. Copy its URL/ID.
+4. Rename it to `Phase 3 renamed`, save, and refresh. Confirm the new name on both the workspace page and dashboard.
+5. Sign out, then sign in again as User A. Confirm the workspace remains. Restart `npm.cmd run dev`, refresh/login if needed, and confirm it still exists.
+6. In an incognito window, register/login as User B. User A's workspace must be absent from User B's dashboard. Paste User A's workspace URL; expect an access-denied screen without its private details.
+7. While User B is on `http://localhost:3000`, open browser DevTools Console, replace `WORKSPACE_ID` below with User A's ID, and run each request. Both must return **403**; User A's name/data must remain unchanged:
+
+   ```js
+   const workspaceApi = 'http://localhost:4000/api/workspaces/WORKSPACE_ID';
+   (await fetch(workspaceApi, { method: 'PATCH', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Unauthorized rename' }) })).status;
+   (await fetch(workspaceApi, { method: 'DELETE', credentials: 'include' })).status;
+   ```
+
+8. As User A, open the workspace, click **Delete workspace**, then **Cancel**. Confirm it remains. Repeat and choose **Confirm delete**. Expect dashboard redirection and the card to disappear. Refresh the old URL; expect workspace not found.
+9. Sign out and open `/workspace/new` or a workspace URL; expect login redirection. While authenticated, open `/workspace/invalid`; expect an invalid-link message.
+
+## APIs (authentication/workspaces verified; later phases drafted)
 
 - Auth: `POST /api/auth/register`, `/login`, `/logout`; `GET/PATCH /api/auth/me`.
 - Workspaces: `GET/POST /api/workspaces`; `GET/PATCH/DELETE /api/workspaces/:id`.
