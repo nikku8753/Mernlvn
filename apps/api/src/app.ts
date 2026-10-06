@@ -8,7 +8,7 @@ import { z, ZodError } from 'zod';
 import { Prisma } from '@prisma/client';
 import { config } from './config.js';
 import { db } from './db.js';
-import { requireAuth,issueSession,publicUser,hashToken,token,cookieOptions } from './auth.js';
+import { requireAuth,issueSession,publicUser,hashToken,cookieOptions } from './auth.js';
 import { HttpError,membership } from './permissions.js';
 import { registerSchema,loginSchema,profileSchema,workspaceSchema,workspaceIdSchema } from './validation.js';
 import { io,revokeAccess,broadcastChat } from './realtime.js';
@@ -16,6 +16,7 @@ import { messageHistory, persistMessage } from './chat.js';
 import { loadDocument,discardDocuments,documentOperation } from './documents.js';
 import { execute } from './execution.js';
 import { fileRoutes } from './files.js';
+import { memberRoutes } from './members.js';
 export function createApp() {
   const app=express();app.set('trust proxy',1);
   app.use(helmet(),cors({origin:config.WEB_ORIGIN,credentials:true}),express.json({limit:'300kb'}),cookieParser());
@@ -35,16 +36,13 @@ export function createApp() {
   app.get('/api/workspaces',async(req,res)=>{const members=await db.workspaceMember.findMany({where:{userId:req.user.id},orderBy:[{lastOpenedAt:'desc'},{workspaceId:'asc'}],include:{workspace:{include:{owner:{select:{id:true,username:true}},_count:{select:{members:true,files:true}}}}}});res.json(members.map(m=>({...m.workspace,role:m.role,lastOpenedAt:m.lastOpenedAt})));});
   // Prisma nested writes atomically create the workspace and its owner membership.
   app.post('/api/workspaces',async(req,res)=>{const data=workspaceSchema.parse(req.body);const workspace=await db.workspace.create({data:{...data,ownerId:req.user.id,members:{create:{userId:req.user.id,role:'OWNER'}}}});res.status(201).json(workspace);});
-  app.post('/api/invites/join',async(req,res)=>{const raw=z.object({token:z.string().min(20).max(100)}).parse(req.body).token;const invite=await db.workspaceInvite.findUnique({where:{token:hashToken(raw)}});if(!invite||invite.expiresAt<new Date())throw new HttpError(410,'This invite is invalid or expired. Ask the owner for a new link.');await db.workspaceMember.upsert({where:{workspaceId_userId:{workspaceId:invite.workspaceId,userId:req.user.id}},create:{workspaceId:invite.workspaceId,userId:req.user.id,role:invite.role},update:{lastOpenedAt:new Date()}});res.json({workspaceId:invite.workspaceId});});
   app.get('/api/workspaces/:id',async(req,res)=>{const id=String(req.params.id);const member=await membership(id,req.user.id);const workspace=await db.workspace.findUnique({where:{id},include:{owner:{select:{id:true,username:true}},members:{include:{user:{select:{id:true,username:true,avatar:true}}}}}});if(!workspace)throw new HttpError(404,'Workspace not found.');await db.workspaceMember.update({where:{workspaceId_userId:{workspaceId:id,userId:req.user.id}},data:{lastOpenedAt:new Date()}});res.json({...workspace,role:member.role});});
   app.patch('/api/workspaces/:id',async(req,res)=>{const id=String(req.params.id);await membership(id,req.user.id,false,true);const data=workspaceSchema.pick({name:true}).parse(req.body);res.json(await db.workspace.update({where:{id},data}));});
   app.delete('/api/workspaces/:id',async(req,res)=>{const id=String(req.params.id);await documentOperation(async()=>{await membership(id,req.user.id,false,true);if(io)await revokeAccess(id);const files=await db.file.findMany({where:{workspaceId:id},select:{id:true}});await discardDocuments(files.map(f=>f.id));await db.workspace.delete({where:{id}});});res.status(204).end();});
-  app.post('/api/workspaces/:id/invites',async(req,res)=>{const id=String(req.params.id);await membership(id,req.user.id,false,true);const {role}=z.object({role:z.enum(['EDITOR','VIEWER']).default('EDITOR')}).parse(req.body);const raw=token();const expiresAt=new Date(Date.now()+24*3600*1000);await db.workspaceInvite.create({data:{workspaceId:id,invitedBy:req.user.id,role,token:hashToken(raw),expiresAt}});res.status(201).json({url:`${config.WEB_ORIGIN}/join/${raw}`,expiresAt,role});});
-  app.patch('/api/workspaces/:id/members/:userId',async(req,res)=>{const id=String(req.params.id),userId=String(req.params.userId);await membership(id,req.user.id,false,true);const member=await membership(id,userId);if(member.role==='OWNER')throw new HttpError(422,'The workspace owner cannot be demoted.');const {role}=z.object({role:z.enum(['EDITOR','VIEWER'])}).parse(req.body);await db.workspaceMember.update({where:{workspaceId_userId:{workspaceId:id,userId}},data:{role}});await revokeAccess(id,userId);res.json({role});});
-  app.delete('/api/workspaces/:id/members/:userId',async(req,res)=>{const id=String(req.params.id),userId=String(req.params.userId);await membership(id,req.user.id,false,true);const member=await membership(id,userId);if(member.role==='OWNER')throw new HttpError(422,'The owner cannot be removed.');await db.workspaceMember.delete({where:{workspaceId_userId:{workspaceId:id,userId}}});await revokeAccess(id,userId);res.status(204).end();});
+  app.use('/api',memberRoutes());
   app.use('/api',fileRoutes());
   app.get('/api/workspaces/:id/messages',async(req,res)=>{res.json(await messageHistory(String(req.params.id),req.user.id,req.query));});
-  app.post('/api/workspaces/:id/messages',async(req,res)=>{const message=await persistMessage(String(req.params.id),req.user.id,req.body);await broadcastChat(message);res.status(201).json(message);});
+  app.post('/api/workspaces/:id/messages',async(req,res)=>{const message=await documentOperation(async()=>{const saved=await persistMessage(String(req.params.id),req.user.id,req.body);await broadcastChat(saved);return saved;});res.status(201).json(message);});
   app.post('/api/files/:id/run',rateLimit({windowMs:60_000,limit:10}),async(req,res)=>{const id=String(req.params.id);const file=await db.file.findUnique({where:{id}});if(!file||file.type!=='FILE')throw new HttpError(404,'File not found.');await membership(file.workspaceId,req.user.id);const {stdin}=z.object({stdin:z.string().max(4000).default('')}).parse(req.body);const workspace=await db.workspace.findUniqueOrThrow({where:{id:file.workspaceId}});const item=await loadDocument(id);res.json(await execute(workspace.language,item.doc.getText('code').toString(),stdin));});
   app.use((_req,res)=>{res.status(404).json({error:'Endpoint not found.'});});
   app.use((error:unknown,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{

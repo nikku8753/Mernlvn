@@ -20,6 +20,7 @@ export function fileRoutes() {
     await membership(id, req.user.id, true);
     const data = fileSchema.parse(req.body);
     const file = await db.$transaction(async tx => {
+      await membership(id, req.user.id, true, false, tx);
       if (data.parentId) {
         const parent = await tx.file.findUnique({ where: { id: data.parentId } });
         if (parent?.workspaceId !== id || parent.type !== 'FOLDER') throw new HttpError(422, 'Choose a folder in this workspace.');
@@ -46,7 +47,7 @@ export function fileRoutes() {
       const result = await db.$transaction(async tx => {
       const file = await tx.file.findUnique({ where: { id } });
       if (!file) throw new HttpError(404, 'File not found.');
-      await membership(file.workspaceId, userId, true);
+      await membership(file.workspaceId, userId, true, false, tx);
       if (data.content !== undefined && file.type !== 'FILE') throw new HttpError(422, 'Folders cannot contain code.');
       if (data.name !== undefined && await tx.file.findFirst({ where: { workspaceId: file.workspaceId, parentId: file.parentId, name: data.name, id: { not: id } } })) throw new HttpError(409, 'That name is already in use here.');
       const result = await tx.file.updateMany({ where: { id, ...(data.updatedAt ? { updatedAt: new Date(data.updatedAt) } : {}) }, data: { updatedAt: new Date(Math.max(Date.now(), file.updatedAt.getTime() + 1)), ...(data.name !== undefined ? { name: data.name } : {}), ...(data.content !== undefined ? { content: data.content, state: null } : {}) } });
@@ -86,7 +87,7 @@ export function fileRoutes() {
       await db.$transaction(async tx => {
       const file = await tx.file.findUnique({ where: { id } });
       if (!file) throw new HttpError(404, 'File not found.');
-      await membership(file.workspaceId, req.user.id, true);
+      await membership(file.workspaceId, req.user.id, true, false, tx);
       await tx.file.delete({ where: { id } });
       await tx.workspace.update({ where: { id: file.workspaceId }, data: { updatedAt: new Date() } });
       }, { isolationLevel: 'Serializable' });

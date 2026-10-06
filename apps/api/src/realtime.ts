@@ -30,6 +30,13 @@ export function deletedFiles(workspaceId:string,ids:string[]){
 export async function revokeAccess(workspaceId:string,userId?:string){
   if(!io)return;for(const socket of await io.in([room(workspaceId),chatRoom(workspaceId)]).fetchSockets())if(!userId||socket.data.user.id===userId){socket.emit('access:revoked');socket.disconnect(true);}
 }
+export async function notifyWorkspaceChanged(workspaceId:string){
+  if(!io)return;
+  for(const socket of io.sockets.sockets.values())if(socket.data.chatWorkspaceId===workspaceId||socket.data.workspaceId===workspaceId){
+    try{const user=await authenticate(socket);const member=await membership(workspaceId,user.id);socket.emit('workspace:changed',{workspaceId,role:member.role});}
+    catch{socket.emit('access:revoked');socket.disconnect(true);}
+  }
+}
 async function chatAccess(socket:Socket,workspaceId:string){
   const user=await authenticate(socket);await membership(workspaceId,user.id);return user;
 }

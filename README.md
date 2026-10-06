@@ -4,7 +4,7 @@ A portfolio project for a real-time collaborative development workspace. Request
 
 ## Current checkpoint
 
-**Phases 1–7 are implemented; Phase 7 awaits your manual verification.** Authentication, profiles, workspaces, file/folder management and Monaco remain intact. Authorized members edit through Socket.IO and Yjs with durable PostgreSQL snapshots, ephemeral presence, live cursors and selections. Workspace chat now persists messages in PostgreSQL and delivers them on the same Socket.IO connection across different files. Sharing/member-management UI, execution and deployment remain deferred; existing later-phase REST drafts are unverified.
+**Phases 1–8 are implemented; Phase 8 awaits your manual verification.** Authentication, workspaces, Monaco/Yjs editing, presence/cursors, and persistent workspace chat remain intact. Owners can now invite registered users by email, manage editor/viewer roles, remove members and revoke pending invitations. Invitees accept or decline from their dashboard. Membership changes take effect through existing server authorization and Socket.IO. Execution and deployment remain deferred; their existing drafts are unverified.
 
 This checkpoint is a local, single-API-instance collaborative editor. No cloud services have been provisioned or deployed.
 
@@ -19,7 +19,7 @@ This checkpoint is a local, single-API-instance collaborative editor. No cloud s
 | 5 | Socket.IO and Yjs synchronization | Completed; concurrent editing, authorization, persistence/restart, reconnect and browser regressions passed |
 | 6 | Presence and live cursors/selections | Completed; authorization/lifecycle, process restart, typecheck, build and Chrome regressions passed |
 | 7 | Persistent real-time chat | Implemented; API/browser regressions, typecheck and build passed; manual verification pending |
-| 8 | Permissions, invites, member management | Backend draft; integration testing pending |
+| 8 | Permissions, invites, member management | Implemented; API/browser regressions, typecheck and build passed; manual verification pending |
 | 9 | Isolated execution | Judge0 adapter draft; sandbox provisioning/testing pending |
 | 10 | Security, tests, performance | Pending |
 | 11 | Full application polish | Landing page implemented; application UI pending |
@@ -43,6 +43,7 @@ apps/
     src/files.ts             File/folder REST operations and content persistence
     src/realtime.ts          Authenticated file synchronization and workspace chat on the Express HTTP server
     src/chat.ts              Persistent messages and bounded history queries
+    src/members.ts           Addressed in-app invitations and owner member administration
     src/documents.ts         Yjs document lifecycle and PostgreSQL snapshots
     src/execution.ts         Isolated runner adapter (draft)
 ```
@@ -63,7 +64,7 @@ Phase 6 adds ephemeral file-scoped presence and Yjs relative-position cursors/se
 | WorkspaceMember | Composite workspace/user key, role, joined/opened dates |
 | File | Workspace-scoped tree, file/folder type, text and CRDT snapshot |
 | Message | Workspace/user relations, message text, timestamp |
-| WorkspaceInvite | Hashed invite token, inviter, role, expiration |
+| WorkspaceInvite | Hashed invite token, inviter, addressed invitee, role, expiration; workspace/invitee uniqueness |
 
 Relations use foreign keys and intentional cascades. Indexes cover memberships, workspace owners, file trees, recent messages, and session expiration. Server-side validation ensures a file parent belongs to its workspace. Future database hardening should add a uniqueness constraint for sibling names with nullable root parents.
 
@@ -419,7 +420,102 @@ Automated verification: `npm test` passed all 7 integration suites; `npm run typ
 
 10. As C, create a separate workspace and send chat there; A/B must not receive it. Leave the workspace as A/B: its socket closes in DevTools Network. Returning restores history without duplicate messages/listeners.
 
-No commits, pushes, deployment or Phase 8 implementation are part of Phase 7. Manual verification is the next step.
+No commits, pushes, deployment or Phase 8 implementation were part of the Phase 7 checkpoint. The current invitation/member workflow is documented below.
+
+## Phase 8 — invitations, members and permissions
+
+Owners open **Workspace details & settings** to view members, invite a registered user by email as EDITOR or VIEWER, change EDITOR ↔ VIEWER, remove a non-owner member with confirmation, or revoke a pending invitation. Member lists remain visible to all members. No ownership transfer is implemented; the owner cannot be removed or demoted.
+
+The dashboard's **Workspace invitations** panel shows invitations addressed to the signed-in account, including workspace, inviter, role and expiration. It refreshes on focus/every 30 seconds and has a Refresh button. Accept atomically creates ordinary `WorkspaceMember` membership with the stored invitation role and consumes the invitation by deleting it. Decline deletes the invitation without granting access. Accept opens the workspace; membership appears in the dashboard afterward. **No email is sent. Normal membership no longer depends on `phase5-member.mjs`**; that script remains a development fixture for historical checks.
+
+Invitations expire after 24 hours. Email input is trimmed, validated and normalized to lowercase. The invitee must already be registered. Inviting the owner, an existing member, or a user with an active pending invitation is rejected. Expired invitations can be replaced. Revoke, decline and acceptance invalidate the old token. Tokens are random and stored only as SHA-256 hashes; links are returned once at creation and may be opened at `/join/[token]` by the addressed account. Signed-out link visitors go to the existing login flow and can find their invitation in the dashboard. Copying a link or guessing an invite ID does not authorize another account to accept it. Client-supplied user/role overrides on accept are rejected.
+
+One migration was necessary: `20261007000000_addressed_invites` adds `WorkspaceInvite.inviteeId`, its User relation, a `(workspaceId, inviteeId)` unique index and an inbox index. The old schema lacked a recipient, which prevented a secure per-user inbox. Existing draft invites retain NULL recipients and cannot be redeemed; owners may revoke them. All newly created invites have a recipient. Existing User/Workspace/WorkspaceMember/WorkspaceInvite models, roles, sessions and token helpers are reused; no duplicate models were added.
+
+| Operation | OWNER | EDITOR | VIEWER |
+| --- | --- | --- | --- |
+| View workspace/files/member list | Yes | Yes | Yes |
+| Receive document updates; show presence/cursors | Yes | Yes | Yes |
+| Edit/save/Yjs updates; create/rename/delete files | Yes | Yes | No |
+| Read/send workspace chat | Yes | Yes | Yes |
+| Invite/revoke; change/remove non-owner members | Yes | No | No |
+| Rename/delete workspace | Yes | No | No |
+| Remove/demote owner or transfer ownership | No | No | No |
+
+Viewers may send chat, preserving Phase 7's simple rule that chat is available to every workspace member. Server-side membership and role checks enforce all file/admin restrictions. Serializable file mutations now check permission inside their transaction; membership administration and REST chat publication share the existing document-operation queue with realtime writes. Strict Zod schemas validate IDs, roles, emails, tokens and bodies. Responses omit password hashes/session data. Member lists expose ID, username and avatar, not email. Invitation inbox/administration includes only the recipient's necessary account data; registered-email lookup is owner-only. Creation is rate-limited and capped at 100 active invitations per workspace.
+
+Role changes publish `workspace:changed` with the recipient's own current role on the existing authenticated socket. The frontend updates file controls/read-only state and refreshes the roster; file collaboration rebinds while workspace chat retains its connection/listeners/history. Each subsequent server write checks the current role, including after reconnect. Removal uses existing `access:revoked` and disconnects every affected file/chat subscription, clears presence through normal disconnect cleanup, and closes the private workspace UI. Removed accounts cannot resubscribe, read files/history or send chat. Mount, focus, reconnect and the existing periodic checks also refresh access.
+
+REST changes (all require the existing authenticated session and Origin protection for mutations):
+
+- `GET /api/invites`: current user's active invitation inbox.
+- `GET /api/invites/token/:token`: addressed account's invitation details.
+- `POST /api/invites/:inviteId/accept` and `/decline`: addressed account only; empty strict body.
+- `POST /api/invites/join`: existing token acceptance endpoint, now recipient-bound and single-use.
+- `GET /api/workspaces/:id/members`: any workspace member; safe member data.
+- `GET /api/workspaces/:id/invites`: owner's active invitation list.
+- `POST /api/workspaces/:id/invites`: existing endpoint now requires `{email, role?}`; allowed roles EDITOR/VIEWER.
+- `DELETE /api/workspaces/:id/invites/:inviteId`: owner revocation, scoped to that workspace.
+- `PATCH /api/workspaces/:id/members/:userId`: existing owner-only endpoint, strict `{role}`, EDITOR/VIEWER only.
+- `DELETE /api/workspaces/:id/members/:userId`: existing owner-only removal endpoint with owner protection and realtime revocation.
+
+Malformed input returns 400; anonymous access 401; forbidden operations/wrong invitee 403; missing resources 404 where appropriate; duplicate pending invitations/membership 409; unavailable/expired/consumed invitation 410; owner-invariant violations 422. Database conflicts use the existing retryable 409 response.
+
+Verification: `npm test` passed 8 suites, including new addressed invitation/accept/decline, token binding, owner invariants, viewer REST/Yjs denial, live role changes, multi-tab removal, chat authorization, workspace isolation, revoke/expire/reissue, logout/login persistence and concurrent invitation/acceptance coverage. Unaddressed legacy links and identity/role overrides are rejected. `npm run typecheck` and `npm run build` passed. `node apps/web/scripts/check-phase8-browser.mjs` passed the complete invitation/acceptance, editing/chat, live editor/viewer/editor, read-only refresh/reconnect, removal/presence cleanup, re-invite/decline, C denial and responsive workflow without manual membership insertion. Earlier browser attempts encountered a database error and harness readiness/offline-emulation issues; the final run passed. The historical collaboration/browser script remains available for regressions.
+
+### Phase 8 manual verification — A through O
+
+Prerequisites: apply migrations with `npm.cmd run db:deploy -w @codesync/api`, generate the client with `npm.cmd run db:generate` while the API is stopped, then run `npm.cmd run dev`. This migration has already been applied to the current local database. Use three isolated browser profiles for registered Owner A, User B and unauthorized User C.
+
+1. **A — Invite B:** A creates/opens a workspace. Expand **Workspace details & settings**. Enter B's registered email, choose **Editor**, and click **Send invitation**. Check success and the pending invitation. Send it again: expect a duplicate conflict. Do not run `phase5-member.mjs`.
+2. **B — Pending invitation:** B logs in and opens the dashboard. Click **Refresh invitations** if needed. Confirm workspace name, inviter A, role EDITOR and expiration.
+3. **C — Accept:** B clicks **Accept**. Expect the workspace to open. A's member list should update to show B as EDITOR; the pending invitation disappears. Refresh invitations to verify it is consumed.
+4. **D — Ordinary membership:** Refresh B's workspace, then go to B's dashboard. Confirm the workspace appears and opens without any development script.
+5. **E — Editing:** A creates/selects `shared.ts`; B selects it too. Type from both profiles. Verify bidirectional changes, presence, cursors and selections; save and refresh both.
+6. **F — Chat:** Exchange messages as A/B, then select different files. Verify workspace chat still works, messages appear once, and refresh preserves history.
+7. **G — Demote:** While B's editor/chat are open, A selects **Viewer** in B's member row and clicks **Save role**.
+8. **H — Read-only:** B's role/status should change to VIEWER/read-only without restarting the app. Typing must not alter the shared document; New File/rename/delete controls disappear. B can still view collaboration and send/read chat. As B, a direct REST attempt must also fail:
+
+   ```js
+   const workspaceId = 'WORKSPACE_ID';
+   const result = await fetch('http://localhost:4000/api/workspaces/' + workspaceId + '/files', {
+     method: 'POST', credentials: 'include', headers: {'Content-Type': 'application/json'},
+     body: JSON.stringify({name: 'viewer-bypass.ts'})
+   });
+   console.log(result.status); // 403
+   ```
+
+   Direct `code:update`/`file:save` viewer denial is covered by the integration suite. Socket probing instructions follow below.
+9. **I — Promote:** A changes B back to **Editor** and saves.
+10. **J — Edit again:** B types in `shared.ts`; A must receive the update. Check presence/cursors and chat still work without duplicate messages.
+11. **K — Remove:** Open B's workspace in a second B tab. A clicks **Remove**, then **Confirm removal**. The owner row must offer no removal/demotion controls.
+12. **L — Lost access:** Both B tabs must show workspace unavailable; editor/chat disappear and B's presence clears in A's view. Refresh B or paste the workspace URL: access remains denied. B's direct file/history requests return 403.
+13. **M — Decline:** A invites B again. B opens the dashboard, refreshes invitations and clicks **Decline**. No membership is created; reopening the workspace is still denied. A refreshes pending invitations to see the invite removed.
+14. **N — Unauthorized C:** C pastes A's workspace URL: no editor/chat. As C, direct GET file/history/member requests and POST invite/PATCH member requests must return 403. C cannot accept/decline B's invitation even with its known ID/token. Create a different workspace as C and confirm its files/chat/members remain isolated.
+15. **O — No stale roles:** Reinvite B as VIEWER and accept. Refresh/reconnect: B remains read-only. Disconnect B, demote or remove B from A while offline, then reconnect: the server must reject stale editing/access, and the UI must refresh permissions. Leaving/rejoining never restores old privileges or duplicates chat.
+
+For direct Socket.IO probes, run in B's/C's browser console on `http://localhost:3000` (replace IDs). This creates a temporary diagnostic connection to the existing server:
+
+```js
+await new Promise((resolve, reject) => {
+  const script = document.createElement('script');
+  script.src = 'http://localhost:4000/socket.io/socket.io.js';
+  script.onload = resolve; script.onerror = reject; document.head.append(script);
+});
+const probe = io('http://localhost:4000', {withCredentials: true});
+const fileId = 'FILE_ID', workspaceId = 'WORKSPACE_ID';
+probe.on('connect', () => {
+  probe.emit('file:subscribe', {fileId}, reply => {
+    console.log('subscribe', reply); // viewer: ok; removed/C: 403
+    probe.emit('code:update', {fileId, update: [0, 0]}, console.log); // viewer: 403
+    probe.emit('file:save', {fileId}, console.log); // viewer: 403
+  });
+  probe.emit('chat:subscribe', {workspaceId}, console.log); // viewer: ok; removed/C: 403
+});
+// Run probe.disconnect() after checking. Never send arbitrary CRDT bytes as an editor.
+```
+
+Phase 8 stops here: no commit, push, ownership transfer, email delivery, execution feature or deployment was added. Manual verification remains the next step.
 
 Deployment is intentionally deferred until functional phases and required integration tests pass.
 

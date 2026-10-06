@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useState, type FormEvent } from 'react';
 import { LogOut, UserRound } from 'lucide-react';
 import { WorkspaceList } from './workspace-list';
+import { InvitationInbox } from './invitation-inbox';
 import { Brand } from './brand';
 import { api, ApiError, validateUsername, type User } from '@/lib/api';
 
@@ -58,6 +59,6 @@ export function DashboardView({ initialUser }: { initialUser: User }) {
       {error && <p className="form-error" role="alert">{error}</p>}{notice && <p className="form-success" role="status">{notice}</p>}
       <div className="dashboard-grid"><section className="dashboard-card" id="profile"><div className="card-heading"><UserRound size={21} /><h2>Your profile</h2></div><div className="profile-summary"><span className="profile-avatar" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span><div><strong>{user.username}</strong><p className="muted">{user.email}</p></div></div>
         <form className="account-form" onSubmit={save}><label htmlFor="profile-username">Username<input id="profile-username" autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} minLength={2} maxLength={32} required disabled={!!busy} /></label><label htmlFor="profile-email">Email<input id="profile-email" type="email" value={user.email} readOnly /></label><small className="muted">Your email is the address you use to sign in.</small><button className="button" disabled={!!busy || username.trim() === user.username}>{busy === 'profile' ? 'Saving…' : 'Save profile'}</button></form>
-      </section><WorkspaceList /></div>
+      </section><div className="dashboard-workspaces"><InvitationInbox /><WorkspaceList /></div></div>
     </main></>;
 }

@@ -4,6 +4,8 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useState, type FormEvent } from 'react';
 import { FolderGit2, Trash2 } from 'lucide-react';
 import { WorkspaceChat } from './workspace-chat';
+import { WorkspaceMembers } from './workspace-members';
+import { WorkspaceAccess } from './workspace-access';
 import { WorkspaceSocketProvider } from '@/lib/workspace-socket';
 import { WorkspaceFiles } from './workspace-files';
 import { Brand } from './brand';
@@ -20,6 +22,7 @@ export function WorkspaceView({ initialWorkspace, username, userId }: { initialW
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [unavailable, setUnavailable] = useState('');
+  const [revision, setRevision] = useState(0);
   const owner = workspace.role === 'OWNER';
   function handleError(error: unknown) {
     if (error instanceof ApiError && error.status === 401) { router.replace('/login'); router.refresh(); }
@@ -42,7 +45,7 @@ export function WorkspaceView({ initialWorkspace, username, userId }: { initialW
     void check(); window.addEventListener('focus', check);
     const timer = window.setInterval(check, 60_000);
     return () => { controller.abort(); window.clearInterval(timer); window.removeEventListener('focus', check); };
-  }, [initialWorkspace.id, router]);
+  }, [initialWorkspace.id, router, revision]);
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setNotice('');
     const validation = validateWorkspaceName(name); setError(validation); if (validation) return;
@@ -59,7 +62,7 @@ export function WorkspaceView({ initialWorkspace, username, userId }: { initialW
     catch (error) { handleError(error); setBusy(null); }
   }
   if (unavailable) return <WorkspaceUnavailable title="Workspace unavailable." message={unavailable} />;
-  return <><header className="site-header"><div className="container nav"><Brand /><Link href="/dashboard" className="button button-secondary button-small">Back to dashboard</Link></div></header><main className="container dashboard"><div className="dashboard-heading"><span className="section-kicker">YOUR WORKSPACE</span><h1>{workspace.name}</h1><p className="muted">Signed in as {username} · Your role: {workspace.role}</p></div>{error && <p className="form-error" role="alert">{error}</p>}{notice && <p className="form-success" role="status">{notice}</p>}<details className="workspace-settings"><summary>Workspace details & settings</summary><div className="workspace-settings-body"><section className="dashboard-card"><div className="card-heading"><FolderGit2 size={21} /><h2>Workspace details</h2></div><dl className="workspace-details"><dt>Owner</dt><dd>{workspace.owner.username}</dd><dt>Language</dt><dd>{workspace.language}</dd><dt>Created</dt><dd><time dateTime={workspace.createdAt}>{workspaceDate(workspace.createdAt)}</time></dd><dt>Updated</dt><dd><time dateTime={workspace.updatedAt}>{workspaceDate(workspace.updatedAt)}</time></dd></dl><h3 className="workspace-members-title">Members ({workspace.members.length})</h3><ul className="workspace-members">{workspace.members.map(member => <li key={member.userId}><span>{member.user.username}</span><span className="phase-badge">{member.role}</span></li>)}</ul>
+  return <><header className="site-header"><div className="container nav"><Brand /><Link href="/dashboard" className="button button-secondary button-small">Back to dashboard</Link></div></header><main className="container dashboard"><div className="dashboard-heading"><span className="section-kicker">YOUR WORKSPACE</span><h1>{workspace.name}</h1><p className="muted">Signed in as {username} · Your role: {workspace.role}</p></div>{error && <p className="form-error" role="alert">{error}</p>}{notice && <p className="form-success" role="status">{notice}</p>}<details className="workspace-settings"><summary>Workspace details & settings</summary><div className="workspace-settings-body"><section className="dashboard-card"><div className="card-heading"><FolderGit2 size={21} /><h2>Workspace details</h2></div><dl className="workspace-details"><dt>Owner</dt><dd>{workspace.owner.username}</dd><dt>Language</dt><dd>{workspace.language}</dd><dt>Created</dt><dd><time dateTime={workspace.createdAt}>{workspaceDate(workspace.createdAt)}</time></dd><dt>Updated</dt><dd><time dateTime={workspace.updatedAt}>{workspaceDate(workspace.updatedAt)}</time></dd></dl><WorkspaceMembers workspace={workspace} refresh={() => setRevision(value => value + 1)} />
       {owner && <><form className="account-form" onSubmit={save}><label htmlFor="rename-workspace">Workspace Name<input id="rename-workspace" value={name} onChange={event => setName(event.target.value)} required maxLength={80} disabled={!!busy} /></label><button className="button" disabled={!!busy || name.trim() === workspace.name}>{busy === 'save' ? 'Saving…' : 'Save changes'}</button></form><div className="workspace-delete">{confirming ? <div role="group" aria-labelledby="delete-title"><h3 id="delete-title">Delete this workspace?</h3><p className="muted">This action cannot be undone.</p><div className="workspace-delete-actions"><button className="button button-danger" disabled={!!busy} onClick={remove}>{busy === 'delete' ? 'Deleting…' : 'Confirm delete'}</button><button className="button button-secondary" disabled={!!busy} onClick={() => setConfirming(false)}>Cancel</button></div></div> : <button className="button button-secondary" disabled={!!busy} onClick={() => setConfirming(true)}><Trash2 size={16} />Delete workspace</button>}</div></>}
-    </section></div></details><WorkspaceSocketProvider key={workspace.id}><WorkspaceFiles workspaceId={workspace.id} role={workspace.role} /><WorkspaceChat workspaceId={workspace.id} userId={userId} /></WorkspaceSocketProvider></main></>;
+    </section></div></details><WorkspaceSocketProvider key={workspace.id}><WorkspaceAccess workspaceId={workspace.id} onChanged={role => { if (role) setWorkspace(previous => ({ ...previous, role })); setRevision(value => value + 1); }} onRevoked={() => setUnavailable("Your session or workspace access ended. Sign in again or ask the owner for an invitation.")} /><WorkspaceFiles workspaceId={workspace.id} role={workspace.role} /><WorkspaceChat workspaceId={workspace.id} userId={userId} /></WorkspaceSocketProvider></main></>;
 }

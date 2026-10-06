@@ -30,6 +30,7 @@ export function WorkspaceFiles({ workspaceId, role }: { workspaceId: string; rol
   const restoredSelection = useRef(false);
   const collaboration = useRef<Collaboration | null>(null);
   const [connection, setConnection] = useState('Connecting…');
+  useEffect(() => { if (!editable) setAction(null); }, [editable]);
   const active = activeId ? buffers[activeId] : undefined;
   const dirty = editable && Object.values(buffers).some(buffer => buffer.content !== buffer.savedContent);
   function fail(error: unknown) {

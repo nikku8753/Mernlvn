@@ -26,7 +26,8 @@ model User {
   owned Workspace[]
   memberships WorkspaceMember[]
   messages Message[]
-  invites WorkspaceInvite[]
+  invites WorkspaceInvite[] @relation("InvitationsSent")
+  receivedInvites WorkspaceInvite[] @relation("InvitationsReceived")
 }
 model Session {
   id String @id
@@ -90,10 +91,14 @@ model WorkspaceInvite {
   id String @id @default(cuid())
   workspaceId String
   invitedBy String
+  inviteeId String?
   token String @unique
   role Role @default(EDITOR)
   expiresAt DateTime
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  inviter User @relation(fields: [invitedBy], references: [id])
+  inviter User @relation("InvitationsSent", fields: [invitedBy], references: [id])
+  invitee User? @relation("InvitationsReceived", fields: [inviteeId], references: [id], onDelete: Cascade)
+  @@unique([workspaceId, inviteeId])
+  @@index([inviteeId, expiresAt])
   @@index([workspaceId])
 }
