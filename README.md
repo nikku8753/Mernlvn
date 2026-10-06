@@ -4,9 +4,9 @@ A portfolio project for a real-time collaborative development workspace. Request
 
 ## Current checkpoint
 
-**Phases 1–4 are complete and locally verified.** Authentication, profiles, workspace ownership and persistence remain intact. Workspaces now include a file/folder explorer and Monaco editor with explicit REST saves to PostgreSQL. Collaboration, sharing, and execution modules remain **unverified scaffolding**, not completed product features. No Phase 5+ frontend functionality is enabled.
+**Phases 1–5 are complete and locally verified.** Authentication, profiles, workspaces, file/folder management and Monaco remain intact. Authorized members can now edit the same file collaboratively through Socket.IO and Yjs, with durable PostgreSQL snapshots. Sharing/member-management UI, live cursors, presence, chat, execution and deployment remain deferred; existing later-phase REST drafts are unverified.
 
-Do not present this checkpoint as a finished collaborative editor. No cloud services have been provisioned or deployed.
+This checkpoint is a local, single-API-instance collaborative editor. No cloud services have been provisioned or deployed.
 
 ## Development plan
 
@@ -16,8 +16,8 @@ Do not present this checkpoint as a finished collaborative editor. No cloud serv
 | 2 | Authentication, profile, dashboard | Completed; typecheck, build, database and auth/route integration checks passed |
 | 3 | Workspace creation and persistence | Completed; CRUD, authorization, persistence/restart, regression tests and build passed |
 | 4 | Monaco integration and file explorer | Completed; REST persistence, file/folder permissions, Monaco browser workflow and regressions passed |
-| 5 | Socket.IO and Yjs synchronization | Backend draft; integration testing pending |
-| 6 | Presence and live cursors | Socket event draft; frontend pending |
+| 5 | Socket.IO and Yjs synchronization | Completed; concurrent editing, authorization, persistence/restart, reconnect and browser regressions passed |
+| 6 | Presence and live cursors | Deferred; no active cursor/presence events or UI |
 | 7 | Persistent real-time chat | Backend draft; frontend pending |
 | 8 | Permissions, invites, member management | Backend draft; integration testing pending |
 | 9 | Isolated execution | Judge0 adapter draft; sandbox provisioning/testing pending |
@@ -41,16 +41,16 @@ apps/
     src/validation.ts        Zod validation
     src/app.ts               Express REST (auth/workspaces/files verified; later endpoints draft)
     src/files.ts             File/folder REST operations and content persistence
-    src/realtime.ts          Socket.IO events (draft)
-    src/documents.ts         Yjs document lifecycle (draft)
+    src/realtime.ts          Authenticated file synchronization on the Express HTTP server
+    src/documents.ts         Yjs document lifecycle and PostgreSQL snapshots
     src/execution.ts         Isolated runner adapter (draft)
 ```
 
 The API runs separately from Next.js so a persistent service owns WebSocket connections. Authentication uses random opaque session cookies, stores only SHA-256 session token hashes, hashes passwords with bcrypt, and limits sessions to seven days. PostgreSQL remains the source of truth for users, workspace membership, files, and chat.
 
-Phase 4 reads and saves plain `File.content` through REST and Prisma; it does not connect Monaco to Socket.IO or Yjs. The API entry point starts only its REST server, with Socket.IO startup disabled. The later-phase collaboration draft uses incremental Yjs updates, lazily loaded documents, debounced CRDT snapshots, and state-vector synchronization. Its integration with Phase 4 persistence remains Phase 5 work. This draft design requires **one backend instance**: horizontal scaling needs document ownership or a shared collaboration persistence design. Debounced collaborative saves can lose recent updates on a hard process crash; a durable update log is a future improvement.
+Socket.IO shares the existing Express HTTP server. Yjs owns one isolated document per file, Monaco binds to its `code` text, and PostgreSQL stores both readable `File.content` and the existing binary `File.state` snapshot. This design requires **one backend instance**; horizontal scaling needs shared document ownership/persistence. See Phase 5 below for save and reconnect behavior.
 
-Draft socket payloads carry validated positions for cursors; relative CRDT cursor positions should be implemented before promising stable cursor tracking under concurrent edits. File deletion/update concurrency and persistence failure handling need integration tests and further hardening.
+No cursor, awareness, presence, activity or chat socket handlers are registered in Phase 5. Relative-position cursors and presence belong to Phase 6.
 
 ## Database schema
 
@@ -157,7 +157,7 @@ The first sandboxed restart test failed because Windows user-info lookup in `tsx
 8. As User A, open the workspace, click **Delete workspace**, then **Cancel**. Confirm it remains. Repeat and choose **Confirm delete**. Expect dashboard redirection and the card to disappear. Refresh the old URL; expect workspace not found.
 9. Sign out and open `/workspace/new` or a workspace URL; expect login redirection. While authenticated, open `/workspace/invalid`; expect an invalid-link message.
 
-## Phase 4 implementation and verification
+## Phase 4 implementation and verification (historical checkpoint)
 
 Phase 4 reuses the existing `File` model and parent/folder relations. **No schema change or migration was required.** PostgreSQL remains the source of truth. Workspace settings, ownership, profile/session behavior, and authorization are preserved; workspace details/settings are now in an expandable section above the coding area.
 
@@ -172,7 +172,7 @@ Verified file APIs:
 
 Reads require authenticated workspace membership; writes require `OWNER` or `EDITOR`. Viewers receive a read-only editor and no file mutation controls, with backend enforcement regardless of the UI. Unknown request fields and malformed IDs are rejected. Filenames follow the existing ASCII letters/numbers/spaces/dots/dashes/underscores rules, are trimmed, and are limited to 100 characters; slashes and `.`/`..` names are rejected. Duplicate sibling names and the existing 100-item workspace limit are checked inside serializable transactions. Content is limited to 200,000 UTF-8 bytes. Workspace timestamps update atomically with mutations.
 
-Content saves require the file's `updatedAt` version and return 409 on a stale write. The editor retains the unsaved draft on failure; **Reload file** explicitly confirms discarding unsaved edits. A plain content save clears the unused draft CRDT snapshot; REST reads/saves do not use the Yjs document cache or emit collaboration events. The existing later-phase socket/document modules have not been expanded or connected to the editor.
+Standalone REST content saves still require the file's `updatedAt` version and return 409 on a stale write, clearing `File.state` on success. The Phase 4 checkpoint used explicit REST saves and confirmed draft discard on reload. Phase 5 replaces editor full-text saves with shared-document flushes; reload/switching now flush pending edits and retain the page if saving fails. REST content replacement is rejected while a collaborative document is open.
 
 The explorer supports root and nested file/folder creation, expanding folders, active-file indication, immediate create/rename/delete updates, confirmed deletion/cancel, and loading/empty/error/retry states. New files open automatically. Monaco maps `.ts/.tsx`, `.js/.jsx`, `.json`, `.html`, `.css`, `.md`, `.py`, `.java`, `.c`, and `.cpp` to their corresponding languages; unknown extensions use plaintext. Save and Ctrl/⌘+S persist content through REST. Keystrokes update only the in-memory draft and unsaved indicator; they send no persistence request. A successful save clears the unsaved marker and displays a saved state. Starting another edit clears the previous save notification. A failed save leaves the code and unsaved indicator intact and displays an error. Unsaved drafts are retained in memory while switching files, and refresh/leaving through page links prompts before discarding them. The selected file ID is stored in the URL query so refresh reopens it; neither file contents nor auth tokens are stored in localStorage.
 
@@ -185,21 +185,21 @@ Verification passed:
 - `git diff --check`: passed.
 - `npm.cmd test`: all three integration suites passed, including Phase 2/3 regressions, file/folder CRUD, nested parent validation, duplicate-create concurrency, strict validation, size limits, stale-save conflicts, user isolation, editor/viewer permissions, logout/login persistence, recursive deletion, and saved file content surviving a real API process restart.
 - `node apps/web/scripts/check-phase4-browser.mjs`: headless Chrome passed registration/dashboard, workspace/file creation, locally hosted Monaco loading, actual typing, exact PostgreSQL persistence, save/refresh/reopen, rename/refresh, saved-file persistence through browser logout/login, mobile editor width, viewer read-only editing, nested folders/files, Ctrl+S, unsaved drafts across file switches, stale-save failure preserving the code/unsaved state, confirmed reload, deletion cancellation/cascade/empty state, deletion remaining effective after refresh, and logout/login.
-- Local Monaco worker asset and API health returned HTTP 200. The Socket.IO handshake URL returned 404, confirming no realtime server is active.
+- At the Phase 4 checkpoint, local Monaco worker assets/API health returned HTTP 200 and the Socket.IO handshake returned 404. Socket.IO is enabled and verified in Phase 5.
 
 The browser helper uses installed Windows Chrome or Edge and creates/cleans up temporary database records. Start both normal services and PostgreSQL before running it. New empty Monaco models use the browser platform's default line endings (CRLF on this Windows machine); saves preserve the exact editor value. Other browsers, full mobile interaction, and production hosting have not been tested.
 
-Remaining scope limits: saves are explicit, unsaved drafts are temporary until saved, no file moves/uploads, and no real-time collaboration, live cursors, presence, chat, invitations/member-management UI, execution, or deployment. Browser Back navigation is not intercepted by a custom navigation blocker; save drafts before leaving with browser history controls. Phase 5 has not been started.
+The paragraphs above record Phase 4 behavior and checks at that checkpoint. Current Phase 5 save behavior and limitations are documented below. File moves/uploads, live cursors, presence, chat, invitations/member-management UI, execution and deployment remain deferred. Browser Back navigation has no custom navigation blocker; confirm a saved state before leaving through browser history.
 
 ### Manual Phase 4 browser checks
 
 1. Login → dashboard → open/create a workspace. Expand **Workspace details & settings** and confirm Phase 3 rename/delete controls still work.
 2. Click **New File**, create `index.ts`, type code, click **Save**, and refresh. Confirm the explorer and reopened Monaco editor show the saved file/code. Verify Ctrl/⌘+S also saves.
 3. Try whitespace-only, slash-containing, and duplicate filenames; expect useful validation/conflict errors. Create `src`, then `src/main.py`; confirm expansion and Python highlighting.
-4. Edit one file without saving, select another file, then return. Confirm its draft remains and displays an unsaved marker. Use **Reload file** and confirm the discard prompt restores the saved content.
+4. Edit one file, select another file, then return. Phase 5 flushes the shared draft before switching; confirm the code remains. Reload also preserves shared edits. While offline with pending edits, switching/reload must fail clearly and retain the current editor.
 5. Rename `index.ts` to `app.ts`, refresh, logout/login, and restart the dev servers. Confirm the filename and saved content remain.
 6. Click delete and cancel; confirm nothing changes. Confirm deletion next; verify the row and editor selection disappear. Refresh and confirm the file remains absent. Confirm deleting a folder also removes descendants.
-7. With two browser tabs open on the same file, save in the first tab, then attempt to save the stale second tab. Expect a conflict and retained draft; reload only after copying or saving any draft you want to keep.
+7. With two authenticated tabs open on the same file, edits now synchronize automatically. Save flushes their shared Yjs state. A separate REST content replacement must return 409 while collaboration is active; standalone REST stale-version protection remains covered by API tests.
 8. Copy User A's workspace ID from `/workspace/ID` and selected file ID from `?file=ID`. In an incognito window, register/login as User B and paste User A's workspace URL; expect access denial. While User B is on `http://localhost:3000`, run the following in DevTools Console with the copied IDs. Every result must be 403, and User A's file must remain unchanged:
 
    ```js
@@ -224,7 +224,64 @@ Remaining scope limits: saves are explicit, unsaved drafts are temporary until s
    Viewer/editor roles are verified through database test fixtures. For a test viewer membership, the explorer is readable and Monaco is read-only; create/rename/save/delete requests must return 403. No sharing/member-management UI is introduced in this phase.
 9. Test narrow viewport layout and a file with an unknown extension; expect a usable explorer/editor layout and plaintext highlighting.
 
-## APIs (authentication/workspaces/files verified; later phases drafted)
+## Phase 5 implementation and verification
+
+Socket.IO is the realtime transport on the existing persistent Express server; Yjs is the CRDT/document synchronization layer; Monaco is the editor interface; PostgreSQL is durable storage. Existing Socket.IO, Yjs and y-monaco packages were reused. **No dependencies, Prisma models or migrations were added/changed.**
+
+Each file uses its own `Y.Doc` with `getText('code')`, keyed by its globally unique file ID, and a `workspace:WORKSPACE_ID:file:FILE_ID` room. A first join restores `File.state` or seeds from `File.content`; the seed's CRDT identity is persisted before clients receive it. Later joins exchange state vectors and missing incremental updates without replacing active state. `MonacoBinding` is created without awareness; receiving remote updates cannot echo them back. Rename keeps the same binding/document identity. Switching destroys the old binding/listeners/socket, flushes pending edits first, and opens a fresh file session. Deleting files/folders removes cached descendant documents and notifies affected editors.
+
+Socket handshakes require the exact `WEB_ORIGIN` and a valid existing HttpOnly session cookie. The server resolves identity using the existing SHA-256 session-token lookup and seven-day expiry. Every event revalidates the session; file operations check the actual file's workspace membership, and updates/saves require OWNER or EDITOR. Recipients are reauthorized before receiving document content, including session/membership revocation. Identifiers, byte arrays, CRDT payloads and size limits are validated. Viewers synchronize read-only. No client-provided user/owner ID is trusted.
+
+### Saving and reconnecting
+
+- Incremental updates synchronize immediately; PostgreSQL is not written on each keystroke.
+- Snapshots atomically persist readable text, binary CRDT state and workspace/file timestamps after **1.5 seconds of inactivity**, or approximately **10 seconds during continuous editing**, subject to queue/database availability.
+- Save / Ctrl+S / Cmd+S waits for pending update acknowledgements, then `file:save` flushes the server's current shared document. It never sends a stale full-text replacement. Persistence errors retain the local document, display an error and retry background persistence after 5 seconds.
+- Last-client disconnect flushes before eviction. Graceful API shutdown closes sockets and waits for queued snapshots. File mutations, eviction, snapshots and workspace deletion share a serialization queue to avoid delete/save races.
+- Existing REST CRUD stays available. Full-text PATCH/REST save returns 409 while a document is cached/open; when no document is open, the original `updatedAt` protection and snapshot clearing remain intact. REST reads return the last durable snapshot, whereas active editors receive live Yjs state.
+- A temporary disconnect retains the client's Y.Doc/binding in memory. Reconnect authenticates and authorizes again, receives missing server changes, then sends missing retained client changes using state vectors. Connecting/Connected/Reconnecting/Offline indicators describe the connection only.
+- Saving failures block dirty-file switching/reload; the draft stays open. Reload no longer discards a shared draft. Unsaved navigation/unload prompts remain. Opening a file initially requires a working API/realtime connection.
+
+Limitations: run **one API instance**. A hard process crash or database outage can lose edits not yet snapshotted if every client also closes; there is no durable update log or offline localStorage. Retained offline edits survive only while the page remains open. File text is limited to 200 KB UTF-8, and snapshots/updates to 2 MB. Database-outage retry behavior is implemented but was not fault-injected. Browser verification used local Windows Chrome; other browsers/production hosting were not tested. No live cursors, presence, online counts, chat, sharing UI, execution or deployment were added.
+
+Verified commands/checks:
+
+- `npm.cmd exec -w @codesync/api prisma validate`: schema valid.
+- `npm.cmd run db:generate`: Prisma Client generated.
+- `npm.cmd exec -w @codesync/api prisma migrate status`: both existing migrations applied; schema up to date.
+- `npm.cmd run typecheck` and `npm.cmd run build`: API and frontend pass.
+- `npm.cmd test`: **all five integration suites pass**, covering Phase 2/3/4 regression behavior, real concurrent Yjs edits, file isolation, malformed requests, origin/session/access denial, viewer write rejection, automatic/explicit persistence, rename/delete, reconnect and actual API process restart with retained offline edits. Integration fixture files run serially against the shared development database; concurrency is exercised within tests.
+- `node apps/web/scripts/check-phase4-browser.mjs`: adapted shared-save regression passes registration/login/dashboard access, workspace/file/folder CRUD, Monaco typing, exact persistence, refresh, rename, viewer read-only mode, keyboard save, switching/reload, stale REST rejection, deletion/cascade and mobile layout.
+- `node apps/web/scripts/check-phase5-browser.mjs`: two isolated authenticated Chrome sessions pass bidirectional Monaco editing, concurrent convergence, Ctrl+S, database text/snapshot persistence, both refreshes, remote rename, file separation, offline editing/reconnect replay, unauthorized third-user denial, remote deletion and logout/login.
+- `node --check` for the development membership/browser scripts and `git diff --check`: pass.
+
+The Windows sandbox initially prevented the existing process-restart test from accessing user information (`uv_os_get_passwd ENOMEM`); rerunning outside the sandbox passed. An overloaded parallel fixture run encountered a transaction conflict and timeout; serial database fixtures pass. Browser verification also exposed and fixed the local Monaco worker base URL and a premature reload assertion.
+
+### Exact manual Phase 5 browser test
+
+1. Start PostgreSQL and both services with `npm.cmd run dev`. In normal Chrome, register/login as development **User A**, create/open a workspace and create `main.ts` plus `other.ts`. Copy the workspace ID from `/workspace/ID`.
+2. In Chrome Incognito, register/login as development **User B**. Use two distinct test accounts. Membership-management UI is deferred; from the repository root, add a legitimate temporary EDITOR membership using the local development database helper:
+
+   ```powershell
+   npm.cmd exec -w @codesync/api -- node scripts/phase5-member.mjs WORKSPACE_ID USER_A_EMAIL USER_B_EMAIL add
+   ```
+
+   This helper requires the actual owner email, existing users/workspace, refuses changes to the owner, and refuses `NODE_ENV=production`. It creates the normal WorkspaceMember relation; production HTTP/socket authorization is unchanged. Use only the local development database.
+3. Open `/workspace/WORKSPACE_ID` as B and select `main.ts`; A selects the same file. Wait for **Connected** in both windows.
+4. Type `const a = 1;` as A: B must see it without saving. Type `const b = 2;` as B: A must see it. Edit near the beginning/end simultaneously and confirm identical content in both editors.
+5. Press Ctrl+S (Cmd+S on macOS), wait for **Saved**, then refresh A and B separately. Both must reopen the same persisted content. Verify logout/login also preserves it.
+6. Switch A to `other.ts`; edit `main.ts` as B. Changes must stay in `main.ts`. Return A to `main.ts` and confirm synchronization. Rename it; both explorers update and code remains.
+7. Set B's DevTools Network mode to **Offline**, wait for Offline/Reconnecting, type a small draft, then restore **No throttling**. Wait for Connected/Saved; both editors must converge and refresh must preserve the merged text. While offline with a pending draft, selecting another file must retain the current editor and report the saving error.
+8. After Saved, stop/restart the API with Ctrl+C and `npm.cmd run dev -w @codesync/api`; keep browsers open. Confirm reconnect, identical content and refresh persistence.
+9. Login as a third account **User C** with no membership. Pasting A's workspace URL must show access denial and no editor. Direct subscribe/update denial is also covered by `realtime.integration.test.ts`; the Phase 4 REST denial console snippet above remains applicable to C.
+10. Delete the selected file as A and confirm the dialog. B must show the deletion notice and clear the editor. Refresh and confirm it remains deleted. No cursor/presence/chat UI should appear.
+11. Remove the temporary B membership after testing:
+
+   ```powershell
+   npm.cmd exec -w @codesync/api -- node scripts/phase5-member.mjs WORKSPACE_ID USER_A_EMAIL USER_B_EMAIL remove
+   ```
+
+## APIs (authentication/workspaces/files/realtime verified; later phases drafted)
 
 - Auth: `POST /api/auth/register`, `/login`, `/logout`; `GET/PATCH /api/auth/me`.
 - Workspaces: `GET/POST /api/workspaces`; `GET/PATCH/DELETE /api/workspaces/:id`.
@@ -236,7 +293,7 @@ Remaining scope limits: saves are explicit, unsaved drafts are temporary until s
 
 REST writes require an `Origin` header matching `WEB_ORIGIN` to prevent cross-site request forgery. Authentication uses credentialed cookies. Validation errors return 400, missing sessions 401, unauthorized actions 403, conflicts 409, expired invitations 410, execution unavailable 503, and execution timeout 504.
 
-Draft Socket.IO events: `workspace:join`, `file:subscribe`, `code:update`, `cursor`, `chat:send`; server broadcasts `presence`, `activity`, `chat:message`, `files:changed`, `file:deleted`, and `access:revoked`. Acknowledgements have `{ok,data}` or `{ok:false,error}`.
+Phase 5 Socket.IO requests: `file:subscribe` (`fileId`, optional state vector), `code:update` (`fileId`, incremental bytes), `file:save` (`fileId`), `file:unsubscribe`. File subscription also joins its authorized workspace room. Server events: `code:update`, `file:persisted`, `files:changed`, `file:deleted`, `access:revoked`. Acknowledgements have `{ok:true,data}` or `{ok:false,status,error}`. No cursor/presence/activity/chat request handlers are enabled.
 
 ## Execution design
 
@@ -257,10 +314,11 @@ Deployment is intentionally deferred until functional phases and required integr
 
 ## Future improvements
 
-Durable CRDT update log, shared document ownership for multiple servers, relative-position awareness cursors, offline editing, cursor throttling, file deletion locks, shared rate limiting, session cleanup, pagination, accessible application dialogs, secure password reset/email verification, audit logs, execution queues, and end-to-end browser tests.
+Durable CRDT update log, shared document ownership for multiple servers, relative-position awareness cursors, durable offline editing, cursor throttling, shared rate limiting, session cleanup, pagination, accessible application dialogs, secure password reset/email verification, audit logs, execution queues, and cross-browser tests.
 
 ## Reference documentation
 
 - [Next.js installation](https://nextjs.org/docs/app/getting-started/installation)
 - [Prisma 6 schema documentation](https://docs.prisma.io/docs/orm/v6/prisma-schema/overview)
 - [Yjs Monaco binding](https://github.com/yjs/y-monaco)
+- [Yjs incremental document updates and state vectors](https://docs.yjs.dev/api/document-updates)

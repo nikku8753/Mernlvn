@@ -40,11 +40,13 @@ async function evaluate(fn, ...args) {
   return result.result.value;
 }
 async function wait(fn, description, ...args) {
-  for (let attempt = 0; attempt < 200; attempt++) {
-    try { if (await evaluate(fn, ...args)) return; } catch {}
+  for (let attempt = 0; attempt < 400; attempt++) {
+    try {
+      if (await evaluate(fn, ...args) && await evaluate(() => !document.querySelector('.monaco-editor') || document.body.innerText.includes('Connected'))) return;
+    } catch {}
     await sleep(150);
   }
-  throw new Error(`Browser check timed out: ${description}`);
+  throw new Error(`Browser check timed out: ${description}; page: ${await evaluate(() => document.body.innerText)}`);
 }
 async function field(selector, value) {
   await wait(selector => { const element = document.querySelector(selector); return element && Object.keys(element).some(key => key.startsWith('__reactFiber')); }, selector, selector);
@@ -160,16 +162,16 @@ try {
     const current = await (await fetch(url, { credentials: 'include' })).json();
     return (await fetch(`${url}/save`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: current.content, updatedAt: current.updatedAt }) })).status;
   }, staleFile.id);
-  assert.equal(concurrentSaveStatus, 200);
-  await click('.editor-toolbar-actions button:last-child');
-  await wait(() => document.querySelector('.file-feedback[role="alert"]') && document.body.innerText.includes('Unsaved changes'), 'failed save preserves dirty state and reports error');
+  assert.equal(concurrentSaveStatus, 409);
   assert.ok((await editorContent()).includes(code + '// unsaved draft'));
+  await wait(() => !document.body.innerText.includes('Unsaved changes'), 'shared draft persisted');
+  code += '// unsaved draft';
   assert.equal((await db.file.findUniqueOrThrow({ where: { id: staleFile.id } })).content, code);
-  console.log('PASS: failed stale save reports an error and preserves editor draft');
+  console.log('PASS: REST replacement is rejected while collaboration preserves and persists the draft');
   await click('.editor-toolbar-actions button:first-child');
-  await wait(() => !document.body.innerText.includes('Unsaved changes'), 'discard draft with confirmed reload');
+  await wait(() => !!document.querySelector('.monaco-editor') && !document.body.innerText.includes('Unsaved changes'), 'reload shared saved document');
   assert.ok((await editorContent()).includes(code));
-  console.log('PASS: unsaved draft survives file switching; confirmed reload restores saved code');
+  console.log('PASS: file switching flushes the draft; reload restores shared saved code');
   await click('[aria-label="Delete src"]'); await click('.file-operation button[type="button"]');
   assert.ok(await evaluate(() => !!document.querySelector('[aria-label="Delete src"]')));
   await click('[aria-label="Delete src"]'); await click('.file-operation button');

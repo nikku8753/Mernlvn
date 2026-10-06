@@ -6,6 +6,7 @@ import { ChevronDown, ChevronRight, Code2, FilePlus2, FileText, Folder, FolderPl
 import { api, ApiError } from '@/lib/api';
 import { type CodeFile, type FileEntry, descendants, fileLanguage, filePath, validateFilename } from '@/lib/files';
 import type { WorkspaceRole } from '@/lib/workspaces';
+import type { Collaboration, Persisted } from '@/lib/collaboration';
 
 const CodeEditor = dynamic(() => import('./code-editor'), { ssr: false, loading: () => <div className="editor-empty" role="status">Loading editor…</div> });
 type Buffer = { file: CodeFile; content: string; savedContent: string };
@@ -27,8 +28,10 @@ export function WorkspaceFiles({ workspaceId, role }: { workspaceId: string; rol
   const [notice, setNotice] = useState('');
   const selection = useRef(0);
   const restoredSelection = useRef(false);
+  const collaboration = useRef<Collaboration | null>(null);
+  const [connection, setConnection] = useState('Connecting…');
   const active = activeId ? buffers[activeId] : undefined;
-  const dirty = Object.values(buffers).some(buffer => buffer.content !== buffer.savedContent);
+  const dirty = editable && Object.values(buffers).some(buffer => buffer.content !== buffer.savedContent);
   function fail(error: unknown) {
     if (error instanceof ApiError && error.status === 401) { router.replace('/login'); router.refresh(); }
     else setError(error instanceof Error ? error.message : 'Unable to complete the file operation.');
@@ -36,7 +39,13 @@ export function WorkspaceFiles({ workspaceId, role }: { workspaceId: string; rol
   const loadList = useCallback(async (signal?: AbortSignal) => {
     try {
       const result = await api<FileEntry[]>(`/api/workspaces/${workspaceId}/files`, { signal });
-      if (!signal?.aborted) { setFiles(result); setListError(''); }
+      if (!signal?.aborted) {
+        setFiles(result); setListError('');
+        setBuffers(previous => Object.fromEntries(Object.entries(previous).map(([id, buffer]) => {
+          const metadata = result.find(file => file.id === id);
+          return [id, metadata ? { ...buffer, file: { ...buffer.file, ...metadata } } : buffer];
+        })));
+      }
     } catch (error) {
       if (signal?.aborted) return;
       if (error instanceof ApiError && error.status === 401) { router.replace('/login'); router.refresh(); }
@@ -68,7 +77,12 @@ export function WorkspaceFiles({ workspaceId, role }: { workspaceId: string; rol
   }, [dirty]);
   async function open(file: FileEntry, reload = false) {
     if (file.type === 'FOLDER') { setExpanded(previous => { const next = new Set(previous); next.has(file.id) ? next.delete(file.id) : next.add(file.id); return next; }); return; }
-    if (reload && buffers[file.id]?.content !== buffers[file.id]?.savedContent && !window.confirm('Reload this file and discard its unsaved edits?')) return;
+    if (editable && active && active.content !== active.savedContent && (file.id !== activeId || reload)) {
+      const freeze = busy === null; if (freeze) setBusy('save');
+      try { const saved = await collaboration.current?.save(); if (!saved) throw new Error('Wait for collaboration to connect before switching files.'); persisted(active.file.id, saved); }
+      catch (error) { fail(error); return; }
+      finally { if (freeze) setBusy(null); }
+    }
     const requestId = ++selection.current;
     setActiveId(file.id); setError(''); setNotice('');
     const url = new URL(window.location.href); url.searchParams.set('file', file.id); window.history.replaceState(null, '', url);
@@ -86,9 +100,9 @@ export function WorkspaceFiles({ workspaceId, role }: { workspaceId: string; rol
     if (new TextEncoder().encode(active.content).length > 200_000) { setError('File content must be at most 200 KB.'); return; }
     setBusy('save'); setError(''); setNotice('');
     try {
-      const saved = await api<CodeFile>(`/api/files/${active.file.id}/save`, { method: 'POST', body: JSON.stringify({ content: active.content, updatedAt: active.file.updatedAt }) });
-      setBuffers(previous => ({ ...previous, [saved.id]: { file: saved, content: saved.content, savedContent: saved.content } }));
-      setFiles(previous => previous?.map(file => file.id === saved.id ? saved : file) || null);
+      const saved = await collaboration.current?.save();
+      if (!saved) throw new Error('Wait for collaboration to connect before saving.');
+      persisted(active.file.id, saved);
       setNotice('File saved.');
     } catch (error) { fail(error); } finally { setBusy(null); }
   }
@@ -98,10 +112,19 @@ export function WorkspaceFiles({ workspaceId, role }: { workspaceId: string; rol
     return () => window.removeEventListener('keydown', shortcut, true);
   });
   function start(action: Action) { setAction(action); setName('file' in action ? action.file.name : ''); setError(''); setNotice(''); }
-  function edit(content: string) {
-    if (!activeId || !editable || busy || active?.content === content) return;
+  function persisted(id: string, saved: Persisted) {
+    setBuffers(previous => previous[id] ? { ...previous, [id]: { ...previous[id], savedContent: saved.content, file: { ...previous[id].file, updatedAt: saved.updatedAt } } } : previous);
+    setFiles(previous => previous?.map(file => file.id === id ? { ...file, updatedAt: saved.updatedAt } : file) || null);
+  }
+  function edit(id: string, content: string) {
     setNotice('');
-    setBuffers(previous => previous[activeId] ? { ...previous, [activeId]: { ...previous[activeId], content } } : previous);
+    setBuffers(previous => previous[id] ? { ...previous, [id]: { ...previous[id], content } } : previous);
+  }
+  function remoteDelete(id: string) {
+    setActiveId(null); selection.current++; setLoadingFile(false);
+    setBuffers(previous => Object.fromEntries(Object.entries(previous).filter(([key]) => key !== id)));
+    setError('This file was deleted.'); void loadList();
+    const url = new URL(window.location.href); url.searchParams.delete('file'); window.history.replaceState(null, '', url);
   }
   async function mutate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!action || busy || !editable) return;
@@ -116,7 +139,7 @@ export function WorkspaceFiles({ workspaceId, role }: { workspaceId: string; rol
         setNotice(created.type === 'FILE' ? 'File created.' : 'Folder created.');
       } else if (action.kind === 'rename') {
         const buffer = buffers[action.file.id];
-        const updated = await api<CodeFile>(`/api/files/${action.file.id}`, { method: 'PATCH', body: JSON.stringify({ name: name.trim(), updatedAt: buffer?.file.updatedAt || action.file.updatedAt }) });
+        const updated = await api<CodeFile>(`/api/files/${action.file.id}`, { method: 'PATCH', body: JSON.stringify({ name: name.trim() }) });
         setFiles(previous => previous?.map(file => file.id === updated.id ? updated : file) || null);
         if (buffer) setBuffers(previous => ({ ...previous, [updated.id]: { ...previous[updated.id], file: updated } }));
         setNotice('Renamed successfully.');
@@ -137,5 +160,5 @@ export function WorkspaceFiles({ workspaceId, role }: { workspaceId: string; rol
   return <section className="coding-workspace" aria-label="Workspace files and code editor"><aside className="file-explorer"><div className="explorer-heading"><h2>Files</h2>{editable && <div className="file-actions"><button aria-label="New File" title="New File" disabled={!!busy || files === null} onClick={() => start({ kind: 'file', parentId: null })}><FilePlus2 size={17} /></button><button aria-label="New Folder" title="New Folder" disabled={!!busy || files === null} onClick={() => start({ kind: 'folder', parentId: null })}><FolderPlus size={17} /></button></div>}<button className="icon-button" aria-label="Refresh files" title="Refresh files" disabled={!!busy} onClick={() => void loadList()}><RefreshCw size={15} /></button></div>
     {listError && <div className="explorer-message"><p role="alert" className="form-error">{listError}</p><button className="button button-secondary button-small" onClick={() => void loadList()}>Retry</button></div>}{files === null ? <p className="explorer-message muted" role="status">{listError ? 'Files are unavailable.' : 'Loading files…'}</p> : files.length === 0 ? <div className="explorer-message"><p className="muted">No files yet.</p>{editable ? <button className="button button-small" onClick={() => start({ kind: 'file', parentId: null })}>Create your first file</button> : <p className="muted">An owner or editor can add files.</p>}</div> : <ul className="file-tree">{tree(null)}</ul>}
     {action && <form className="file-operation account-form" onSubmit={mutate}>{action.kind === 'delete' ? <><h3>Delete {action.file.name}?</h3><p className="muted">This action cannot be undone.{action.file.type === 'FOLDER' ? ' All files and folders inside will also be deleted.' : ''} Unsaved edits to deleted files will be discarded.</p></> : <label htmlFor="file-name">{action.kind === 'rename' ? 'Rename' : action.kind === 'folder' ? 'New Folder' : 'New File'}<input id="file-name" value={name} onChange={event => setName(event.target.value)} maxLength={100} required autoFocus disabled={!!busy} /></label>}<div className="file-operation-actions"><button className={`button button-small ${action.kind === 'delete' ? 'button-danger' : ''}`} disabled={!!busy}>{busy === 'mutate' ? 'Please wait…' : action.kind === 'delete' ? 'Confirm delete' : action.kind === 'rename' ? 'Rename' : 'Create'}</button><button type="button" className="button button-secondary button-small" disabled={!!busy} onClick={() => setAction(null)}>Cancel</button></div></form>}
-  </aside><div className="editor-panel"><div className="editor-toolbar"><span className="editor-filename">{active ? filePath(active.file, files || []) : 'No file selected'}</span>{active && <span className="editor-save-state">{active.content !== active.savedContent ? 'Unsaved changes' : 'Saved'}</span>}<div className="editor-toolbar-actions">{active && <button className="button button-secondary button-small" disabled={!!busy || loadingFile} onClick={() => void open(active.file, true)}>Reload file</button>}<button className="button button-small" disabled={!active || !editable || !!busy || loadingFile || active.content === active.savedContent} onClick={() => void save()}><Save size={15} />{busy === 'save' ? 'Saving…' : 'Save'}</button></div></div>{error && <p className="form-error file-feedback" role="alert">{error}</p>}{notice && <p className="form-success file-feedback" role="status">{notice}</p>}<div className="editor-surface">{loadingFile ? <div className="editor-empty" role="status">Loading file…</div> : active ? <CodeEditor key={`${active.file.id}:${active.file.name}`} id={active.file.id} name={active.file.name} language={fileLanguage(active.file.name)} content={active.content} readOnly={!editable || !!busy} onChange={edit} /> : <div className="editor-empty"><Code2 size={35} /><h3>Select a file to start coding.</h3><p className="muted">{editable ? 'Choose a file from the explorer, or create your first file.' : 'You have read-only access to this workspace.'}</p></div>}</div><div className="editor-status"><span>{active ? fileLanguage(active.file.name) : 'CodeSync'}</span><span>{editable ? 'Ctrl / ⌘ + S to save' : 'Read-only access'}</span></div></div></section>;
+  </aside><div className="editor-panel"><div className="editor-toolbar"><span className="editor-filename">{active ? filePath(active.file, files || []) : 'No file selected'}</span>{active && <span className="editor-save-state">{active.content !== active.savedContent ? 'Unsaved changes' : 'Saved'}</span>}<div className="editor-toolbar-actions">{active && <button className="button button-secondary button-small" disabled={!!busy || loadingFile} onClick={() => void open(active.file, true)}>Reload file</button>}<button className="button button-small" disabled={!active || !editable || !!busy || loadingFile || active.content === active.savedContent} onClick={() => void save()}><Save size={15} />{busy === 'save' ? 'Saving…' : 'Save'}</button></div></div>{error && <p className="form-error file-feedback" role="alert">{error}</p>}{notice && <p className="form-success file-feedback" role="status">{notice}</p>}<div className="editor-surface">{loadingFile ? <div className="editor-empty" role="status">Loading file…</div> : active ? <CodeEditor key={active.file.id} id={active.file.id} name={active.file.name} language={fileLanguage(active.file.name)} content={active.content} readOnly={!editable || !!busy} writable={editable} onChange={content => edit(active.file.id, content)} onState={setConnection} onSaved={saved => persisted(active.file.id, saved)} onError={fail} onFiles={() => void loadList()} onSession={session => { collaboration.current = session; }} onDeleted={() => remoteDelete(active.file.id)} /> : <div className="editor-empty"><Code2 size={35} /><h3>Select a file to start coding.</h3><p className="muted">{editable ? 'Choose a file from the explorer, or create your first file.' : 'You have read-only access to this workspace.'}</p></div>}</div><div className="editor-status"><span>{active ? fileLanguage(active.file.name) : 'CodeSync'} {active && ` · ${connection}`}</span><span>{editable ? 'Ctrl / ⌘ + S to save' : 'Read-only access'}</span></div></div></section>;
 }

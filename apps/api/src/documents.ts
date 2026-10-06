@@ -1,32 +1,53 @@
 import * as Y from 'yjs';
 import { db } from './db.js';
 import { HttpError } from './permissions.js';
-type Document = {doc:Y.Doc;workspaceId:string;dirty:boolean;version:number;timer?:ReturnType<typeof setTimeout>;saving?:Promise<void>};
-const docs=new Map<string,Promise<Document>>();
-export async function loadDocument(id:string) {
-  let pending=docs.get(id);
-  if(!pending) {
-    pending=(async()=>{const file=await db.file.findUnique({where:{id}});if(!file||file.type!=='FILE')throw new HttpError(404,'File not found.');const doc=new Y.Doc();if(file.state)Y.applyUpdate(doc,file.state);else doc.getText('code').insert(0,file.content);return {doc,workspaceId:file.workspaceId,dirty:false,version:0};})();
-    docs.set(id,pending); pending.catch(()=>docs.delete(id));
-  }
-  return pending;
+type Document = { doc:Y.Doc; workspaceId:string; dirty:boolean; timer?:ReturnType<typeof setTimeout>; deadline?:ReturnType<typeof setTimeout> };
+const docs=new Map<string,Document>();
+let queue:Promise<unknown>=Promise.resolve();
+// REST mutations and realtime operations serialize through the same queue.
+export function documentOperation<T>(action:()=>Promise<T>):Promise<T>{const result=queue.then(action);queue=result.catch(()=>undefined);return result;}
+export function hasDocument(id:string){return docs.has(id);}
+export async function loadDocument(id:string){
+  const existing=docs.get(id);if(existing)return existing;
+  const file=await db.file.findUnique({where:{id}});if(!file||file.type!=='FILE')throw new HttpError(404,'File not found.');
+  const doc=new Y.Doc();if(file.state)Y.applyUpdate(doc,file.state);else doc.getText('code').insert(0,file.content);
+  const item:Document={doc,workspaceId:file.workspaceId,dirty:!file.state};docs.set(id,item);
+  // Persist the seed's CRDT identity before exposing it, even to read-only users.
+  // Otherwise evict/rejoin could seed identical text with different item IDs.
+  if(item.dirty) { try { await flushDocument(id); } catch(error) { docs.delete(id);doc.destroy();throw error; } }
+  return item;
 }
-export async function flushDocument(id:string) {
-  const pending=docs.get(id);if(!pending)return;
-  const item=await pending;
-  if(item.saving) {await item.saving;return flushDocument(id);}
-  if(!item.dirty)return;
-  const version=item.version;
-  item.saving=(async()=>{await db.$transaction([db.file.update({where:{id},data:{state:Buffer.from(Y.encodeStateAsUpdate(item.doc)),content:item.doc.getText('code').toString()}}),db.workspace.update({where:{id:item.workspaceId},data:{updatedAt:new Date()}})]);if(item.version===version)item.dirty=false;})();
-  try {await item.saving;} finally {item.saving=undefined;}
+let status:(id:string,data:{content?:string;updatedAt?:string;error?:string})=>void=()=>{};
+export function onDocumentStatus(callback:typeof status){status=callback;}
+export async function flushDocument(id:string){
+  const item=docs.get(id);if(!item)return;
+  if(!item.dirty)return db.file.findUniqueOrThrow({where:{id}});
+  const content=item.doc.getText('code').toString();
+  const file=await db.$transaction(async tx=>{
+    const prior=await tx.file.findUniqueOrThrow({where:{id}});
+    const saved=await tx.file.update({where:{id},data:{content,state:Buffer.from(Y.encodeStateAsUpdate(item.doc)),updatedAt:new Date(Math.max(Date.now(),prior.updatedAt.getTime()+1))}});
+    await tx.workspace.update({where:{id:item.workspaceId},data:{updatedAt:new Date()}});return saved;
+  });
+  item.dirty=false;clearTimeout(item.timer);clearTimeout(item.deadline);item.deadline=undefined;
+  status(id,{content,updatedAt:file.updatedAt.toISOString()});return file;
 }
-export async function updateDocument(id:string,update:Uint8Array) {
-  const item=await loadDocument(id);
-  const candidate=new Y.Doc();
-  try {Y.applyUpdate(candidate,Y.encodeStateAsUpdate(item.doc));Y.applyUpdate(candidate,update);if(candidate.getText('code').length>200_000||Y.encodeStateAsUpdate(candidate).length>2_000_000)throw new HttpError(413,'File is too large (200 KB limit).');} finally {candidate.destroy();}
-  Y.applyUpdate(item.doc,update);item.dirty=true;item.version++;
-  clearTimeout(item.timer);item.timer=setTimeout(()=>{flushDocument(id).catch(e=>{console.error('Snapshot failed:',e.message);item.timer=setTimeout(()=>void flushDocument(id).catch(console.error),5000);});},1500);
+function schedule(id:string,item:Document){
+  const persist=()=>void documentOperation(()=>flushDocument(id)).catch(()=>{
+    status(id,{error:'Unable to persist collaborative edits. Retry Save; keep this page open.'});
+    if(docs.get(id)===item)item.timer=setTimeout(persist,5000);
+  });
+  clearTimeout(item.timer);item.timer=setTimeout(persist,1500);item.deadline??=setTimeout(persist,10000);
 }
-export async function evictDocument(id:string) {const item=await docs.get(id);if(item){clearTimeout(item.timer);await flushDocument(id);item.doc.destroy();docs.delete(id);}}
-export async function discardDocuments(ids:string[]) {for(const id of ids){const item=await docs.get(id);if(item){clearTimeout(item.timer);if(item.saving)await item.saving;item.doc.destroy();docs.delete(id);}}}
-export async function flushAll(){await Promise.all([...docs.keys()].map(flushDocument));}
+export async function updateDocument(id:string,update:Uint8Array){
+  const item=await loadDocument(id);const candidate=new Y.Doc();
+  try{
+    Y.applyUpdate(candidate,Y.encodeStateAsUpdate(item.doc));Y.applyUpdate(candidate,update);
+    if(Buffer.byteLength(candidate.getText('code').toString())>200_000||Y.encodeStateAsUpdate(candidate).length>2_000_000)throw new HttpError(413,'File is too large (200 KB text / 2 MB document limit).');
+    if([...candidate.share.keys()].some(key=>key!=='code'))throw new HttpError(400,'Invalid document update.');
+  }catch(error){if(error instanceof HttpError)throw error;throw new HttpError(400,'Invalid document update.');}
+  finally{candidate.destroy();}
+  Y.applyUpdate(item.doc,update);item.dirty=true;schedule(id,item);
+}
+export async function evictDocument(id:string){await flushDocument(id);await discardDocuments([id]);}
+export async function discardDocuments(ids:string[]){for(const id of ids){const item=docs.get(id);if(item){clearTimeout(item.timer);clearTimeout(item.deadline);item.doc.destroy();docs.delete(id);}}}
+export async function flushAll(){for(const id of docs.keys())await flushDocument(id);}
