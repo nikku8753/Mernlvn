@@ -37,9 +37,13 @@ test('collaborative CRDT identity and offline edits survive API process restart'
     async function connect() {
       socket = io(`http://localhost:${port}`, { transports: ['websocket'], extraHeaders: { Origin: config.WEB_ORIGIN, Cookie: cookie }, reconnection: false });
       await new Promise<void>((resolve, reject) => { socket!.once('connect', resolve); socket!.once('connect_error', reject); });
+      const presence = new Promise<any>(resolve => socket!.once('presence:state', resolve));
       const sync = await emit('file:subscribe', { fileId: file.id, vector: Array.from(Y.encodeStateVector(doc)) });
+      const roster = await presence; expect(roster.fileId).toBe(file.id); expect(roster.entries).toHaveLength(1); expect(roster.entries[0].userId).toBe(registered.body.id);
       Y.applyUpdate(doc, Uint8Array.from(sync.update));
       await emit('code:update', { fileId: file.id, update: Array.from(Y.encodeStateAsUpdate(doc, Uint8Array.from(sync.vector))) });
+      const position = Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(doc.getText('code'), 0));
+      await emit('presence:update', { fileId: file.id, selection: { anchor: position, head: position } });
     }
     await start(); await connect(); expect(doc.getText('code').toString()).toBe('seed\n');
     const vector = Y.encodeStateVector(doc); doc.getText('code').insert(doc.getText('code').length, 'persisted\n');

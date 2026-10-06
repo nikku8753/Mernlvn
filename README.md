@@ -4,7 +4,7 @@ A portfolio project for a real-time collaborative development workspace. Request
 
 ## Current checkpoint
 
-**Phases 1–5 are complete and locally verified.** Authentication, profiles, workspaces, file/folder management and Monaco remain intact. Authorized members can now edit the same file collaboratively through Socket.IO and Yjs, with durable PostgreSQL snapshots. Sharing/member-management UI, live cursors, presence, chat, execution and deployment remain deferred; existing later-phase REST drafts are unverified.
+**Phases 1–6 are complete and locally verified.** Authentication, profiles, workspaces, file/folder management and Monaco remain intact. Authorized members edit the same file through Socket.IO and Yjs with durable PostgreSQL snapshots, ephemeral presence, live cursors and selections. Phase 6 passed automated API and Chrome checks; exact normal-Chrome/Incognito manual instructions are below. Sharing/member-management UI, chat, execution and deployment remain deferred; existing later-phase REST drafts are unverified.
 
 This checkpoint is a local, single-API-instance collaborative editor. No cloud services have been provisioned or deployed.
 
@@ -17,7 +17,7 @@ This checkpoint is a local, single-API-instance collaborative editor. No cloud s
 | 3 | Workspace creation and persistence | Completed; CRUD, authorization, persistence/restart, regression tests and build passed |
 | 4 | Monaco integration and file explorer | Completed; REST persistence, file/folder permissions, Monaco browser workflow and regressions passed |
 | 5 | Socket.IO and Yjs synchronization | Completed; concurrent editing, authorization, persistence/restart, reconnect and browser regressions passed |
-| 6 | Presence and live cursors | Deferred; no active cursor/presence events or UI |
+| 6 | Presence and live cursors/selections | Completed; authorization/lifecycle, process restart, typecheck, build and Chrome regressions passed |
 | 7 | Persistent real-time chat | Backend draft; frontend pending |
 | 8 | Permissions, invites, member management | Backend draft; integration testing pending |
 | 9 | Isolated execution | Judge0 adapter draft; sandbox provisioning/testing pending |
@@ -50,7 +50,7 @@ The API runs separately from Next.js so a persistent service owns WebSocket conn
 
 Socket.IO shares the existing Express HTTP server. Yjs owns one isolated document per file, Monaco binds to its `code` text, and PostgreSQL stores both readable `File.content` and the existing binary `File.state` snapshot. This design requires **one backend instance**; horizontal scaling needs shared document ownership/persistence. See Phase 5 below for save and reconnect behavior.
 
-No cursor, awareness, presence, activity or chat socket handlers are registered in Phase 5. Relative-position cursors and presence belong to Phase 6.
+Phase 6 adds ephemeral file-scoped presence and Yjs relative-position cursors/selections on the same authenticated Socket.IO connection. Monaco decorations and text-only user labels render remote activity. PostgreSQL stores durable file content and CRDT snapshots, never cursor or presence state. Chat socket handlers remain deferred.
 
 ## Database schema
 
@@ -189,7 +189,7 @@ Verification passed:
 
 The browser helper uses installed Windows Chrome or Edge and creates/cleans up temporary database records. Start both normal services and PostgreSQL before running it. New empty Monaco models use the browser platform's default line endings (CRLF on this Windows machine); saves preserve the exact editor value. Other browsers, full mobile interaction, and production hosting have not been tested.
 
-The paragraphs above record Phase 4 behavior and checks at that checkpoint. Current Phase 5 save behavior and limitations are documented below. File moves/uploads, live cursors, presence, chat, invitations/member-management UI, execution and deployment remain deferred. Browser Back navigation has no custom navigation blocker; confirm a saved state before leaving through browser history.
+The paragraphs above record Phase 4 behavior and checks at that checkpoint. Current Phase 5 save behavior and Phase 6 presence/cursors are documented below. File moves/uploads, chat, invitations/member-management UI, execution and deployment remain deferred. Browser Back navigation has no custom navigation blocker; confirm a saved state before leaving through browser history.
 
 ### Manual Phase 4 browser checks
 
@@ -274,12 +274,61 @@ The Windows sandbox initially prevented the existing process-restart test from a
 7. Set B's DevTools Network mode to **Offline**, wait for Offline/Reconnecting, type a small draft, then restore **No throttling**. Wait for Connected/Saved; both editors must converge and refresh must preserve the merged text. While offline with a pending draft, selecting another file must retain the current editor and report the saving error.
 8. After Saved, stop/restart the API with Ctrl+C and `npm.cmd run dev -w @codesync/api`; keep browsers open. Confirm reconnect, identical content and refresh persistence.
 9. Login as a third account **User C** with no membership. Pasting A's workspace URL must show access denial and no editor. Direct subscribe/update denial is also covered by `realtime.integration.test.ts`; the Phase 4 REST denial console snippet above remains applicable to C.
-10. Delete the selected file as A and confirm the dialog. B must show the deletion notice and clear the editor. Refresh and confirm it remains deleted. No cursor/presence/chat UI should appear.
+10. Delete the selected file as A and confirm the dialog. B must show the deletion notice and clear the editor. Refresh and confirm it remains deleted. Phase 6 presence and cursor UI must also clear.
 11. Remove the temporary B membership after testing:
 
    ```powershell
    npm.cmd exec -w @codesync/api -- node scripts/phase5-member.mjs WORKSPACE_ID USER_A_EMAIL USER_B_EMAIL remove
    ```
+
+## Phase 6 presence, live cursors and selections
+
+Presence uses the existing authenticated Socket.IO transport and document authorization, with one in-memory entry per joined socket. Identity and username come from the session; clients supply only a strictly validated file ID and nullable selection. Read-authorized viewers can publish cursors while document writes still require OWNER/EDITOR. Each recipient is reauthorized before receiving presence/cursor data. A 15-second sweep removes expired sessions or memberships changed outside the realtime handlers.
+
+`Collaborators (N)` lists **other users**, excluding the current user and deduplicating people by authenticated user ID. Multiple tabs maintain separate cursors, with a shared user color; closing one connection does not remove another active tab. Closing the last tab removes that user's presence. File switches dispose listeners, decorations and labels and disconnect the old file socket. Disconnect clears the local roster, and reconnect uses the Phase 5 document resynchronization before republishing the retained selection. File deletion clears server presence and file subscriptions immediately and clears the editor UI; later cursor updates for that subscription are rejected.
+
+Cursor/selection anchors are Yjs relative positions in the existing `code` text. Monaco decorations render the remote caret and highlighted range, including reverse selections, with unobtrusive username content widgets. Position mapping accounts for LF versus CRLF display offsets. Names enter DOM `textContent`, not HTML or generated CSS. Colors come from a fixed eight-color palette, with collisions avoided for up to eight concurrently present users and the same user's active tabs sharing a color. Colors remain fixed on active connections; a new session can receive a different available color, and colors repeat beyond eight users.
+
+Cursor updates are coalesced every 80 ms (at most 12.5 Hz), with one request in flight and document updates acknowledged first. The server separately limits presence requests to 25 per second under the existing 100-event socket limit. Cursor events update Monaco directly; React's collaborator list changes only for roster changes, and the workspace does not rerender for cursor movement. No schema, migration or dependency changes were needed.
+
+The installed `y-monaco` Awareness integration was inspected. Its direct path accepts arbitrary client metadata and leaves cursor-selection listeners undisposed. This implementation therefore uses small validated presence events on the existing socket, plus Yjs relative positions and explicitly disposed Monaco listeners. It adds no second transport or independent document synchronization system. Yjs remains responsible for document convergence, and PostgreSQL remains responsible only for durable file content/snapshots.
+
+### Phase 6 automated verification
+
+- `npm.cmd run typecheck`: API and web passed.
+- `npm.cmd run build`: API TypeScript and Next.js production builds passed.
+- `npm.cmd test`: all six suites passed, including Phase 2 auth/profile/routes, Phase 3 workspace CRUD/permissions/restart, Phase 4 file CRUD/persistence, Phase 5 concurrent Yjs editing/reconnect, Phase 6 presence/cursor validation and lifecycle, and actual API restart with restored presence and cursor updates.
+- `node apps/web/scripts/check-phase5-browser.mjs`: the expanded existing regression script passed bidirectional/concurrent editing, Ctrl+S, snapshots/refresh, rename/file isolation, presence, bidirectional cursor labels, forward/reverse selections, positions following inserted text, file-switch cleanup, offline replay/reconnect, deduplicated multiple tabs, close/rejoin, LF-saved snapshots in Windows Monaco without content mutation, unauthorized C, remote deletion with an active selection, responsive layout, and logout/login. It uses isolated headless Chrome profiles; the manual normal/Incognito workflow remains available below.
+- `node --check apps/web/scripts/check-phase5-browser.mjs` and `git diff --check`: passed.
+
+Windows sandbox restrictions required running Vitest and headless Chrome outside the sandbox. Initial runs exposed and fixed restored-Yjs-root cursor validation and an assertion landing inside a CRLF newline. Temporary local database failures during concurrent verification were resolved by rerunning; the final API and browser runs passed. No database-outage fault injection or production/multiple-API-instance verification was performed.
+
+### Exact manual Phase 6 browser test
+
+1. Start PostgreSQL and the services with `npm.cmd run dev`. In **normal Chrome**, log in as **User A**, create/open a workspace, and create `main.ts` and `app.ts`. Put several lines of code in `main.ts`, for example `const message = "hello";`, and save. Copy the workspace ID from `/workspace/ID`.
+2. In **Chrome Incognito**, log in as a distinct **User B**. Add legitimate development membership from the repository root (replace all placeholders):
+
+   ```powershell
+   npm.cmd exec -w @codesync/api -- node scripts/phase5-member.mjs WORKSPACE_ID USER_A_EMAIL USER_B_EMAIL add
+   ```
+
+   This existing helper requires the actual owner and existing accounts and refuses production use. It creates ordinary EDITOR membership; it does not bypass HTTP or socket authorization.
+3. **A — Presence:** Open `/workspace/WORKSPACE_ID` in both windows, select `main.ts`, and wait for **Connected**. A must see B's username in `Collaborators (1)`, and B must see A's. Neither list includes its own user.
+4. **B — Cursor:** Click different lines/columns and use arrow keys in A's editor. B must see A's colored remote caret and label move. Repeat B → A. Keep focus in the source editor; blurring it clears its cursor while preserving file presence.
+5. **C — Selection:** As A, drag across several characters and then multiple lines, including `const message = "hello";`. B must see the highlighted remote range. Repeat B → A and drag backward to check reverse selections. Cursor/selection movement alone must leave the file content and Saved state unchanged.
+6. **D — Editing regression:** Type as A, then as B, then simultaneously at different places. Both editors must converge. Insert text before a remote selection; its indicator must follow the selected text. Press Ctrl+S, wait for Saved, and refresh each window; content must remain.
+7. **E — File switch:** Switch B from `main.ts` to `app.ts`. A's main.ts list must become `Collaborators (0)`, and B's caret/selection/label must disappear. Move B's cursor in app.ts; nothing must appear in A's main.ts. Switch B back to main.ts; presence and cursor updates must return.
+8. **F — Disconnect:** Close B's tab. A must lose B's presence and indicators (an abrupt network loss may wait for Socket.IO's heartbeat timeout). Reopen B's Incognito session, log in if needed, and select main.ts; B must appear exactly once. Open a second B tab on the same file: A's person count must remain one. Close one B tab: B must remain present until the last B tab leaves.
+9. **G — Reconnect:** After Saved, stop only the API with Ctrl+C and restart with `npm.cmd run dev -w @codesync/api`; leave both browsers open. Wait for Connected: content must remain, each person must appear once, and bidirectional cursors/selections must work. Also test B's DevTools Network **Offline**, then **No throttling**; presence must clear and return, and Phase 5 offline edits must still replay.
+10. **H — Unauthorized C:** Use another isolated browser profile as **User C**, without adding membership. Paste `/workspace/WORKSPACE_ID` and the selected `?file=FILE_ID` URL. Expect access denial with no editor, collaborator list, or cursor data. Existing/new API tests also verify direct socket denial.
+11. **I — Delete:** Keep B on main.ts with a selection. A deletes main.ts and confirms. B must see the deletion notice, the editor must close, and presence/cursor/selection UI must disappear. Refresh: the file must remain deleted.
+12. Remove the temporary B membership when finished:
+
+   ```powershell
+   npm.cmd exec -w @codesync/api -- node scripts/phase5-member.mjs WORKSPACE_ID USER_A_EMAIL USER_B_EMAIL remove
+   ```
+
+Presence remains single-API-instance ephemeral state. Abrupt disconnect detection follows Socket.IO heartbeat timing; labels can overlap if collaborators share a cursor location. No Phase 7+ functionality is implemented in this checkpoint.
 
 ## APIs (authentication/workspaces/files/realtime verified; later phases drafted)
 
@@ -293,7 +342,7 @@ The Windows sandbox initially prevented the existing process-restart test from a
 
 REST writes require an `Origin` header matching `WEB_ORIGIN` to prevent cross-site request forgery. Authentication uses credentialed cookies. Validation errors return 400, missing sessions 401, unauthorized actions 403, conflicts 409, expired invitations 410, execution unavailable 503, and execution timeout 504.
 
-Phase 5 Socket.IO requests: `file:subscribe` (`fileId`, optional state vector), `code:update` (`fileId`, incremental bytes), `file:save` (`fileId`), `file:unsubscribe`. File subscription also joins its authorized workspace room. Server events: `code:update`, `file:persisted`, `files:changed`, `file:deleted`, `access:revoked`. Acknowledgements have `{ok:true,data}` or `{ok:false,status,error}`. No cursor/presence/activity/chat request handlers are enabled.
+Phase 5 Socket.IO requests: `file:subscribe` (`fileId`, optional state vector), `code:update` (`fileId`, incremental bytes), `file:save` (`fileId`), `file:unsubscribe`. File subscription also joins its authorized workspace room. Server events: `code:update`, `file:persisted`, `files:changed`, `file:deleted`, `access:revoked`. Acknowledgements have `{ok:true,data}` or `{ok:false,status,error}`. Phase 6 adds `presence:update` (`fileId`, nullable relative selection), `presence:state` (authorized file roster), and `presence:cursor` (connection-specific selection). No activity/chat request handlers are enabled.
 
 ## Execution design
 
@@ -314,7 +363,7 @@ Deployment is intentionally deferred until functional phases and required integr
 
 ## Future improvements
 
-Durable CRDT update log, shared document ownership for multiple servers, relative-position awareness cursors, durable offline editing, cursor throttling, shared rate limiting, session cleanup, pagination, accessible application dialogs, secure password reset/email verification, audit logs, execution queues, and cross-browser tests.
+Durable CRDT update log, shared document ownership for multiple servers, durable offline editing, shared rate limiting, session cleanup, pagination, accessible application dialogs, secure password reset/email verification, audit logs, execution queues, and cross-browser tests.
 
 ## Reference documentation
 
