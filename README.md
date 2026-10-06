@@ -4,7 +4,7 @@ A portfolio project for a real-time collaborative development workspace. Request
 
 ## Current checkpoint
 
-**Phases 1–6 are complete and locally verified.** Authentication, profiles, workspaces, file/folder management and Monaco remain intact. Authorized members edit the same file through Socket.IO and Yjs with durable PostgreSQL snapshots, ephemeral presence, live cursors and selections. Phase 6 passed automated API and Chrome checks; exact normal-Chrome/Incognito manual instructions are below. Sharing/member-management UI, chat, execution and deployment remain deferred; existing later-phase REST drafts are unverified.
+**Phases 1–7 are implemented; Phase 7 awaits your manual verification.** Authentication, profiles, workspaces, file/folder management and Monaco remain intact. Authorized members edit through Socket.IO and Yjs with durable PostgreSQL snapshots, ephemeral presence, live cursors and selections. Workspace chat now persists messages in PostgreSQL and delivers them on the same Socket.IO connection across different files. Sharing/member-management UI, execution and deployment remain deferred; existing later-phase REST drafts are unverified.
 
 This checkpoint is a local, single-API-instance collaborative editor. No cloud services have been provisioned or deployed.
 
@@ -18,7 +18,7 @@ This checkpoint is a local, single-API-instance collaborative editor. No cloud s
 | 4 | Monaco integration and file explorer | Completed; REST persistence, file/folder permissions, Monaco browser workflow and regressions passed |
 | 5 | Socket.IO and Yjs synchronization | Completed; concurrent editing, authorization, persistence/restart, reconnect and browser regressions passed |
 | 6 | Presence and live cursors/selections | Completed; authorization/lifecycle, process restart, typecheck, build and Chrome regressions passed |
-| 7 | Persistent real-time chat | Backend draft; frontend pending |
+| 7 | Persistent real-time chat | Implemented; API/browser regressions, typecheck and build passed; manual verification pending |
 | 8 | Permissions, invites, member management | Backend draft; integration testing pending |
 | 9 | Isolated execution | Judge0 adapter draft; sandbox provisioning/testing pending |
 | 10 | Security, tests, performance | Pending |
@@ -39,9 +39,10 @@ apps/
     src/auth.ts              Opaque cookie sessions
     src/permissions.ts       Server authorization
     src/validation.ts        Zod validation
-    src/app.ts               Express REST (auth/workspaces/files verified; later endpoints draft)
+    src/app.ts               Express REST (auth/workspaces/files/chat verified; later endpoints draft)
     src/files.ts             File/folder REST operations and content persistence
-    src/realtime.ts          Authenticated file synchronization on the Express HTTP server
+    src/realtime.ts          Authenticated file synchronization and workspace chat on the Express HTTP server
+    src/chat.ts              Persistent messages and bounded history queries
     src/documents.ts         Yjs document lifecycle and PostgreSQL snapshots
     src/execution.ts         Isolated runner adapter (draft)
 ```
@@ -50,7 +51,7 @@ The API runs separately from Next.js so a persistent service owns WebSocket conn
 
 Socket.IO shares the existing Express HTTP server. Yjs owns one isolated document per file, Monaco binds to its `code` text, and PostgreSQL stores both readable `File.content` and the existing binary `File.state` snapshot. This design requires **one backend instance**; horizontal scaling needs shared document ownership/persistence. See Phase 5 below for save and reconnect behavior.
 
-Phase 6 adds ephemeral file-scoped presence and Yjs relative-position cursors/selections on the same authenticated Socket.IO connection. Monaco decorations and text-only user labels render remote activity. PostgreSQL stores durable file content and CRDT snapshots, never cursor or presence state. Chat socket handlers remain deferred.
+Phase 6 adds ephemeral file-scoped presence and Yjs relative-position cursors/selections on the same authenticated Socket.IO connection. Monaco decorations and text-only user labels render remote activity. PostgreSQL stores durable file content and CRDT snapshots, never cursor or presence state. Phase 7 adds a workspace-lifetime Socket.IO connection shared by chat and file collaboration. Separate workspace chat subscriptions survive file switches while file presence and cursors retain their existing lifecycle.
 
 ## Database schema
 
@@ -328,7 +329,7 @@ Windows sandbox restrictions required running Vitest and headless Chrome outside
    npm.cmd exec -w @codesync/api -- node scripts/phase5-member.mjs WORKSPACE_ID USER_A_EMAIL USER_B_EMAIL remove
    ```
 
-Presence remains single-API-instance ephemeral state. Abrupt disconnect detection follows Socket.IO heartbeat timing; labels can overlap if collaborators share a cursor location. No Phase 7+ functionality is implemented in this checkpoint.
+Presence remains single-API-instance ephemeral state. Abrupt disconnect detection follows Socket.IO heartbeat timing; labels can overlap if collaborators share a cursor location. No Phase 7+ functionality was implemented at the Phase 6 checkpoint; current chat behavior is documented below.
 
 ## APIs (authentication/workspaces/files/realtime verified; later phases drafted)
 
@@ -342,7 +343,7 @@ Presence remains single-API-instance ephemeral state. Abrupt disconnect detectio
 
 REST writes require an `Origin` header matching `WEB_ORIGIN` to prevent cross-site request forgery. Authentication uses credentialed cookies. Validation errors return 400, missing sessions 401, unauthorized actions 403, conflicts 409, expired invitations 410, execution unavailable 503, and execution timeout 504.
 
-Phase 5 Socket.IO requests: `file:subscribe` (`fileId`, optional state vector), `code:update` (`fileId`, incremental bytes), `file:save` (`fileId`), `file:unsubscribe`. File subscription also joins its authorized workspace room. Server events: `code:update`, `file:persisted`, `files:changed`, `file:deleted`, `access:revoked`. Acknowledgements have `{ok:true,data}` or `{ok:false,status,error}`. Phase 6 adds `presence:update` (`fileId`, nullable relative selection), `presence:state` (authorized file roster), and `presence:cursor` (connection-specific selection). No activity/chat request handlers are enabled.
+Phase 5 Socket.IO requests: `file:subscribe` (`fileId`, optional state vector), `code:update` (`fileId`, incremental bytes), `file:save` (`fileId`), `file:unsubscribe`. File subscription also joins its authorized workspace room. Server events: `code:update`, `file:persisted`, `files:changed`, `file:deleted`, `access:revoked`. Acknowledgements have `{ok:true,data}` or `{ok:false,status,error}`. Phase 6 adds `presence:update` (`fileId`, nullable relative selection), `presence:state` (authorized file roster), and `presence:cursor` (connection-specific selection). No activity/chat request handlers were enabled at the Phase 6 checkpoint. Phase 7 chat events are documented below.
 
 ## Execution design
 
@@ -358,6 +359,67 @@ Provision and validate a patched, private sandbox service on a separate host bef
 4. Set `WEB_ORIGIN` to the actual frontend domain; use HTTPS/WSS and one backend instance initially.
 5. Prefer `app.example.com` and `api.example.com` on the same site. Unrelated Vercel/Render domains require SameSite=None cookies; browser third-party cookie policies can still block them.
 6. Verify two authenticated browser sessions, simultaneous edits, reconnects, save/rejoin, viewer rejection, expired invites, role revocation, chat persistence, and sandbox resource limits before release.
+
+## Phase 7 — persistent workspace chat
+
+The workspace page includes sender names, timestamps, text messages, history, an input and Send button. Your messages have a distinct background and a “you” label. Enter sends; Shift+Enter inserts a newline. All workspace members, including viewers, can chat before selecting a file, across different files, and after a file is deleted.
+
+The existing Prisma `Message` model and workspace/timestamp index are reused. **No schema change or migration is required.** Messages persist before broadcast. Identity comes from the authenticated session; client identity fields are rejected. Messages must contain non-whitespace text and be at most 2,000 characters. React renders content as text. Sender data includes only ID and username.
+
+Existing REST endpoints are hardened:
+
+- `GET /api/workspaces/:id/messages`: authenticated membership required; newest 100 messages in ascending `createdAt, id` order. Optional `before=MESSAGE_ID` loads an earlier page; optional `after=MESSAGE_ID` loads a forward page for reconnect catch-up. Each page is capped at 100. Cursors must belong to this workspace. Invalid input returns 400; responses use `Cache-Control: no-store`.
+- `POST /api/workspaces/:id/messages`: retained for compatibility; validates `{message}`, uses the session user, persists and publishes through the same recipient-authorization path. The UI sends through Socket.IO.
+
+Socket requests use existing `{ok:true,data}` / `{ok:false,status,error}` acknowledgements:
+
+- `chat:subscribe` / `chat:unsubscribe`: `{workspaceId}`. Subscription requires authenticated workspace membership; file subscriptions remain separate.
+- `chat:send`: `{workspaceId,message}`. Requires an authorized chat subscription; acknowledgement contains the persisted message.
+- `chat:message`: persisted message delivered to authorized subscribers, including the sender. Message IDs reconcile acknowledgement, broadcast and history into one UI entry.
+
+Recipients are reauthenticated and membership-checked before every publication; the existing 15-second sweep also checks chat-only connections. Workspace deletion and membership revocation disconnect chat subscribers. Reconnect subscribes before requesting history and fills missed pages. Sends are disabled while offline and never automatically replayed. An acknowledgement timeout retains the draft and asks the user to check history before retrying; manually resending identical text creates a new message. Leaving the workspace removes listeners and closes its shared socket.
+
+Automated verification: `npm test` passed all 7 integration suites; `npm run typecheck` and `npm run build` passed. The new chat suite covers anonymous/nonmember denial, socket authorization, viewer access, safe sender fields, validation, cross-file delivery, workspace isolation, persistence, deterministic bounded pagination, unsubscribe/reconnect and ID reconciliation, REST compatibility, removed membership and expired sessions. The existing real-process restart suite now verifies chat survives API restart and logout/login. `node apps/web/scripts/check-phase5-browser.mjs` passed chat/Enter/text rendering/refresh/cross-file/reconnect/deletion checks alongside Monaco/Yjs/presence/cursors, unauthorized-user denial, responsive layout and logout/login. Earlier browser attempts encountered development-server/database errors and a fixed-delay convergence check; the final isolated run passed after the test waited for actual convergence.
+
+### Phase 7 manual verification — Users A, B and C
+
+1. Start PostgreSQL and run `npm run dev` from the root. Open `http://localhost:3000` in three isolated browser profiles. Register/login A, B and C with different emails.
+2. As A, create a TypeScript workspace and copy its ID from `/workspace/WORKSPACE_ID`. Add B using the existing development fixture (no sharing UI is added):
+
+   ```powershell
+   cd apps/api
+   node scripts/phase5-member.mjs WORKSPACE_ID A_EMAIL B_EMAIL add
+   ```
+
+3. Open the workspace as A and B. Before selecting files, exchange messages. Verify immediate delivery, names, timestamps, and one copy per message. Each user's own messages should show “you” only in their browser.
+4. As A, create `test.ts` and `second.ts`. Open `test.ts` as A and `second.ts` as B. Exchange messages and switch files several times; chat should remain connected. Then open the same file in both profiles and verify collaborative edits, cursors and selections still work.
+5. Check Enter to send and Shift+Enter for a newline. Send `<img src=x onerror=alert(1)>`: it must appear literally, with no image/alert. Whitespace-only messages cannot send; the input stops at 2,000 characters.
+6. Refresh both profiles: history remains chronological with no duplicates. With more than 100 messages, use “Load earlier messages”.
+7. Set B's DevTools Network to Offline and wait for chat to report offline. Send from A, then restore B's network. The missed message should appear once. Repeat with pending editor changes to verify existing reconnection behavior.
+8. Stop only the API and restart it without resetting PostgreSQL. Verify reconnect/history. Go to the dashboard, logout/login, and reopen the workspace: history remains.
+9. As C, open A's workspace URL: expect access denied, with no editor/chat. Use C's browser console to probe the known workspace ID:
+
+   ```js
+   const workspaceId = 'WORKSPACE_ID';
+   const response = await fetch('http://localhost:4000/api/workspaces/' + workspaceId + '/messages', { credentials: 'include' });
+   console.log(response.status); // 403
+   await new Promise((resolve, reject) => {
+     const script = document.createElement('script');
+     script.src = 'http://localhost:4000/socket.io/socket.io.js';
+     script.onload = resolve; script.onerror = reject; document.head.append(script);
+   });
+   const probe = io('http://localhost:4000', { withCredentials: true });
+   probe.on('chat:message', message => console.error('Unexpected unauthorized message', message));
+   probe.on('connect', () => {
+     probe.emit('chat:subscribe', { workspaceId }, console.log); // ok:false, status:403
+     probe.emit('chat:send', { workspaceId, message: 'Unauthorized C' }, console.log); // ok:false, status:403
+   });
+   // Send another message as A: C must receive nothing. Then run probe.disconnect().
+   ```
+
+10. As C, create a separate workspace and send chat there; A/B must not receive it. Leave the workspace as A/B: its socket closes in DevTools Network. Returning restores history without duplicate messages/listeners.
+
+No commits, pushes, deployment or Phase 8 implementation are part of Phase 7. Manual verification is the next step.
 
 Deployment is intentionally deferred until functional phases and required integration tests pass.
 

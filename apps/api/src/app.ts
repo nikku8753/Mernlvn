@@ -10,8 +10,9 @@ import { config } from './config.js';
 import { db } from './db.js';
 import { requireAuth,issueSession,publicUser,hashToken,token,cookieOptions } from './auth.js';
 import { HttpError,membership } from './permissions.js';
-import { registerSchema,loginSchema,profileSchema,workspaceSchema,workspaceIdSchema,messageSchema } from './validation.js';
-import { io,revokeAccess } from './realtime.js';
+import { registerSchema,loginSchema,profileSchema,workspaceSchema,workspaceIdSchema } from './validation.js';
+import { io,revokeAccess,broadcastChat } from './realtime.js';
+import { messageHistory, persistMessage } from './chat.js';
 import { loadDocument,discardDocuments,documentOperation } from './documents.js';
 import { execute } from './execution.js';
 import { fileRoutes } from './files.js';
@@ -42,8 +43,8 @@ export function createApp() {
   app.patch('/api/workspaces/:id/members/:userId',async(req,res)=>{const id=String(req.params.id),userId=String(req.params.userId);await membership(id,req.user.id,false,true);const member=await membership(id,userId);if(member.role==='OWNER')throw new HttpError(422,'The workspace owner cannot be demoted.');const {role}=z.object({role:z.enum(['EDITOR','VIEWER'])}).parse(req.body);await db.workspaceMember.update({where:{workspaceId_userId:{workspaceId:id,userId}},data:{role}});await revokeAccess(id,userId);res.json({role});});
   app.delete('/api/workspaces/:id/members/:userId',async(req,res)=>{const id=String(req.params.id),userId=String(req.params.userId);await membership(id,req.user.id,false,true);const member=await membership(id,userId);if(member.role==='OWNER')throw new HttpError(422,'The owner cannot be removed.');await db.workspaceMember.delete({where:{workspaceId_userId:{workspaceId:id,userId}}});await revokeAccess(id,userId);res.status(204).end();});
   app.use('/api',fileRoutes());
-  app.get('/api/workspaces/:id/messages',async(req,res)=>{const id=String(req.params.id);await membership(id,req.user.id);res.json((await db.message.findMany({where:{workspaceId:id},take:100,orderBy:{createdAt:'desc'},include:{user:{select:{id:true,username:true,avatar:true}}}})).reverse());});
-  app.post('/api/workspaces/:id/messages',async(req,res)=>{const id=String(req.params.id);await membership(id,req.user.id);const data=messageSchema.parse(req.body);const message=await db.message.create({data:{...data,workspaceId:id,userId:req.user.id},include:{user:{select:{id:true,username:true,avatar:true}}}});io?.to(`workspace:${id}`).emit('chat:message',message);res.status(201).json(message);});
+  app.get('/api/workspaces/:id/messages',async(req,res)=>{res.json(await messageHistory(String(req.params.id),req.user.id,req.query));});
+  app.post('/api/workspaces/:id/messages',async(req,res)=>{const message=await persistMessage(String(req.params.id),req.user.id,req.body);await broadcastChat(message);res.status(201).json(message);});
   app.post('/api/files/:id/run',rateLimit({windowMs:60_000,limit:10}),async(req,res)=>{const id=String(req.params.id);const file=await db.file.findUnique({where:{id}});if(!file||file.type!=='FILE')throw new HttpError(404,'File not found.');await membership(file.workspaceId,req.user.id);const {stdin}=z.object({stdin:z.string().max(4000).default('')}).parse(req.body);const workspace=await db.workspace.findUniqueOrThrow({where:{id:file.workspaceId}});const item=await loadDocument(id);res.json(await execute(workspace.language,item.doc.getText('code').toString(),stdin));});
   app.use((_req,res)=>{res.status(404).json({error:'Endpoint not found.'});});
   app.use((error:unknown,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{

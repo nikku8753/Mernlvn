@@ -10,7 +10,7 @@ export const fileSchema = z.object({name:filename, type:z.enum(['FILE','FOLDER']
 export const fileContent = z.string().max(200_000).refine(v=>Buffer.byteLength(v,'utf8')<=200_000,'File content must be at most 200 KB.');
 export const fileUpdateSchema = z.object({name:filename.optional(),content:fileContent.optional(),updatedAt:z.iso.datetime().optional()}).strict().refine(v=>v.name!==undefined||v.content!==undefined,'Provide a filename or content.').refine(v=>v.content===undefined||v.updatedAt!==undefined,'Include updatedAt when saving content.');
 export const fileSaveSchema = z.object({content:fileContent,updatedAt:z.iso.datetime()}).strict();
-export const messageSchema = z.object({message:z.string().trim().min(1).max(2000)});
+export const messageSchema = z.object({message:z.string().max(2000).trim().min(1)}).strict();
 export function canEdit(role: string) { return role === 'OWNER' || role === 'EDITOR'; }
 export const starters: Record<string,{name:string;content:string}> = {
   javascript:{name:'main.js',content:'// Welcome to CodeSync. Build something together.\n\nfunction greet(name) {\n  return `Hello, ${name}!`;\n}\n\nconsole.log(greet("world"));\n'},

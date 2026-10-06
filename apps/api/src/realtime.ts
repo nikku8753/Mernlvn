@@ -9,8 +9,10 @@ import { HttpError, membership } from './permissions.js';
 import { documentOperation,loadDocument,updateDocument,evictDocument,flushDocument,onDocumentStatus } from './documents.js';
 import { workspaceIdSchema } from './validation.js';
 import { selectionSchema, validateSelection, userColor } from './presence.js';
+import { chatIdentity, chatSend, persistMessage } from './chat.js';
 export let io:Server;
 const room=(id:string)=>'workspace:'+id;
+const chatRoom=(id:string)=>room(id)+':chat';
 const fileRoom=(workspace:string,id:string)=>room(workspace)+':file:'+id;
 const bytes=z.array(z.number().int().min(0).max(255)).max(2_000_000);
 const identity=z.object({fileId:workspaceIdSchema});
@@ -26,7 +28,17 @@ export function deletedFiles(workspaceId:string,ids:string[]){
   notifyFiles(workspaceId);
 }
 export async function revokeAccess(workspaceId:string,userId?:string){
-  if(!io)return;for(const socket of await io.in(room(workspaceId)).fetchSockets())if(!userId||socket.data.user.id===userId){socket.emit('access:revoked');socket.disconnect(true);}
+  if(!io)return;for(const socket of await io.in([room(workspaceId),chatRoom(workspaceId)]).fetchSockets())if(!userId||socket.data.user.id===userId){socket.emit('access:revoked');socket.disconnect(true);}
+}
+async function chatAccess(socket:Socket,workspaceId:string){
+  const user=await authenticate(socket);await membership(workspaceId,user.id);return user;
+}
+export async function broadcastChat(message:{workspaceId:string}){
+  if(!io)return;
+  for(const socket of io.sockets.sockets.values())if(socket.data.chatWorkspaceId===message.workspaceId){
+    try{await chatAccess(socket,message.workspaceId);if(socket.connected)socket.emit('chat:message',message);}
+    catch{socket.emit('access:revoked');socket.disconnect(true);}
+  }
 }
 async function authenticate(socket:Socket){
   const session=await getSession(socket.handshake.headers.cookie);
@@ -66,6 +78,9 @@ export function realtime(server:HttpServer){
   const sweep=setInterval(()=>{void documentOperation(async()=>{
     const ids=new Set<string>([...io.sockets.sockets.values()].map(s=>s.data.fileId).filter(Boolean));
     for(const id of ids)await publishPresence(id);
+    for(const socket of io.sockets.sockets.values())if(socket.data.chatWorkspaceId){
+      try{await chatAccess(socket,socket.data.chatWorkspaceId);}catch{socket.emit('access:revoked');socket.disconnect(true);}
+    }
   }).catch(()=>console.error('Unable to refresh presence.'));},15000);
   sweep.unref();server.on('close',()=>clearInterval(sweep));
   io.on('connection',socket=>{
@@ -85,6 +100,20 @@ export function realtime(server:HttpServer){
       await publishPresence(id);
       if(![...io.sockets.sockets.values()].some(s=>s.data.fileId===id))await evictDocument(id);
     }
+    handle('chat:subscribe',async payload=>{
+      const {workspaceId}=chatIdentity.parse(payload);await chatAccess(socket,workspaceId);
+      if(socket.data.chatWorkspaceId)await socket.leave(chatRoom(socket.data.chatWorkspaceId));
+      socket.data.chatWorkspaceId=workspaceId;await socket.join(chatRoom(workspaceId));return {workspaceId};
+    });
+    handle('chat:unsubscribe',async payload=>{
+      const {workspaceId}=chatIdentity.parse(payload);
+      if(socket.data.chatWorkspaceId===workspaceId){socket.data.chatWorkspaceId=undefined;await socket.leave(chatRoom(workspaceId));}
+    });
+    handle('chat:send',async payload=>{
+      const {workspaceId,message}=chatSend.parse(payload);const user=await chatAccess(socket,workspaceId);
+      if(socket.data.chatWorkspaceId!==workspaceId)throw new HttpError(409,'Subscribe to workspace chat first.');
+      const saved=await persistMessage(workspaceId,user.id,{message});await broadcastChat(saved);return saved;
+    });
     handle('file:subscribe',async payload=>{
       const {fileId,vector}=identity.extend({vector:bytes.optional()}).strict().parse(payload);const file=await access(socket,fileId);
       if(socket.data.fileId!==fileId)await leave();

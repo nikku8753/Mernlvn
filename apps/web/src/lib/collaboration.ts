@@ -10,6 +10,12 @@ export type Presence = { connectionId: string; userId: string; username: string;
 export class Collaboration {
   readonly doc = new Y.Doc();
   readonly socket: Socket;
+  private ownedListeners: Array<() => void> = [];
+  private ownsSocket = true;
+  private listen(event: string, listener: (...args: any[]) => void) {
+    this.socket.on(event, listener);
+    this.ownedListeners.push(() => this.socket.off(event, listener));
+  }
   private joined = false;
   private disposed = false;
   private pending: Promise<unknown> = Promise.resolve();
@@ -48,37 +54,40 @@ export class Collaboration {
     state: (state: string) => void; change: (content: string) => void;
     saved: (saved: Persisted) => void; error: (error: Error) => void;
     deleted: () => void; files: () => void; ready: () => void;
-  }) {
-    this.socket = io(API_URL, { withCredentials: true, autoConnect: false, reconnectionDelayMax: 3000 });
+  }, sharedSocket?: Socket) {
+    this.ownsSocket = !sharedSocket;
+    this.socket = sharedSocket ?? io(API_URL, { withCredentials: true, autoConnect: false, reconnectionDelayMax: 3000 });
     this.doc.getText('code').observe(() => callbacks.change(this.doc.getText('code').toString()));
     this.doc.on('update', (update: Uint8Array, origin: unknown) => {
       if (origin !== this && this.joined && writable) this.send(update);
     });
-    this.socket.on('connect', () => { void this.synchronize(); });
-    this.socket.on('disconnect', () => { this.joined = false; this.clearPresence(); callbacks.state('Reconnecting…'); });
-    this.socket.on('connect_error', (error: Error) => {
+    this.listen('connect', () => { void this.synchronize(); });
+    this.listen('disconnect', () => { this.joined = false; this.clearPresence(); callbacks.state('Reconnecting…'); });
+    this.listen('connect_error', (error: Error) => {
       this.joined = false; callbacks.state('Offline');
       if (/sign in|authenticate/i.test(error.message)) callbacks.error(new Error('Please sign in again. Copy any pending edits before leaving this page.'));
     });
-    this.socket.on('code:update', (data: { fileId: string; update: number[] }) => {
+    this.listen('code:update', (data: { fileId: string; update: number[] }) => {
       if (data.fileId === fileId) Y.applyUpdate(this.doc, Uint8Array.from(data.update), this);
     });
-    this.socket.on('file:persisted', (data: Persisted & { fileId: string; error?: string }) => {
+    this.listen('file:persisted', (data: Persisted & { fileId: string; error?: string }) => {
       if (data.fileId !== fileId) return;
       if (data.error) callbacks.error(new Error(data.error)); else callbacks.saved(data);
     });
-    this.socket.on('files:changed', callbacks.files);
-    this.socket.on('presence:state', (data: { fileId: string; entries: Presence[] }) => {
+    this.listen('files:changed', callbacks.files);
+    this.listen('presence:state', (data: { fileId: string; entries: Presence[] }) => {
       if (data.fileId !== fileId || this.disposed) return;
       this.entries = new Map(data.entries.map(entry => [entry.connectionId, entry])); this.presenceChanged();
     });
-    this.socket.on('presence:cursor', (data: { fileId: string; entry: Presence }) => {
+    this.listen('presence:cursor', (data: { fileId: string; entry: Presence }) => {
       if (data.fileId !== fileId || this.disposed || !this.entries.has(data.entry.connectionId)) return;
       this.entries.set(data.entry.connectionId, data.entry); this.presenceChanged();
     });
-    this.socket.on('file:deleted', (data: { fileId: string }) => { if (data.fileId === fileId) { this.joined = false; this.clearPresence(); callbacks.deleted(); } });
-    this.socket.on('access:revoked', () => { this.joined = false; this.clearPresence(); callbacks.state('Offline'); callbacks.error(new ApiError('Your session or workspace access ended. Copy any pending edits before leaving.', 403)); });
-    callbacks.state('Connecting…'); this.socket.connect();
+    this.listen('file:deleted', (data: { fileId: string }) => { if (data.fileId === fileId) { this.joined = false; this.clearPresence(); callbacks.deleted(); } });
+    this.listen('access:revoked', () => { this.joined = false; this.clearPresence(); callbacks.state('Offline'); callbacks.error(new ApiError('Your session or workspace access ended. Copy any pending edits before leaving.', 403)); });
+    callbacks.state('Connecting…');
+    if (this.socket.connected) void this.synchronize();
+    else if (this.ownsSocket) this.socket.connect();
   }
   private request<T>(event: string, payload: unknown): Promise<T> {
     return new Promise((resolve, reject) => {
@@ -122,5 +131,5 @@ export class Collaboration {
     if (this.failure) { await this.synchronize(); if (this.failure) throw this.failure; }
     return this.request<Persisted>('file:save', { fileId: this.fileId });
   }
-  destroy() { this.disposed = true; this.joined = false; this.clearPresence(); this.presenceListeners.clear(); this.socket.removeAllListeners(); this.socket.disconnect(); this.doc.destroy(); }
+  destroy() { this.disposed = true; this.joined = false; this.clearPresence(); this.presenceListeners.clear(); this.ownedListeners.forEach(remove => remove()); this.ownedListeners = []; if (this.ownsSocket) this.socket.disconnect(); else if (this.socket.connected) this.socket.emit('file:unsubscribe', {}); this.doc.destroy(); }
 }

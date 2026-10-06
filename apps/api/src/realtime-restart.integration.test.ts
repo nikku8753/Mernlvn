@@ -46,16 +46,25 @@ test('collaborative CRDT identity and offline edits survive API process restart'
       await emit('presence:update', { fileId: file.id, selection: { anchor: position, head: position } });
     }
     await start(); await connect(); expect(doc.getText('code').toString()).toBe('seed\n');
+    await emit('chat:subscribe', { workspaceId });
+    const chatMessage = await emit('chat:send', { workspaceId, message: 'Chat survives a real API restart.' });
     const vector = Y.encodeStateVector(doc); doc.getText('code').insert(doc.getText('code').length, 'persisted\n');
     await emit('code:update', { fileId: file.id, update: Array.from(Y.encodeStateAsUpdate(doc, vector)) });
     await emit('file:save', { fileId: file.id });
     socket!.disconnect(); child!.kill(); await once(child!, 'exit');
     doc.getText('code').insert(0, 'offline\n');
     await start(); await connect();
+    await emit('chat:subscribe', { workspaceId });
+    const chatHistory = await fetch(`http://localhost:${port}/api/workspaces/${workspaceId}/messages`, { headers: { Cookie: cookie } });
+    expect(chatHistory.status).toBe(200); expect(await chatHistory.json()).toEqual([chatMessage]);
     expect(doc.getText('code').toString()).toBe('offline\nseed\npersisted\n');
     expect((await emit('file:save', { fileId: file.id })).content).toBe('offline\nseed\npersisted\n');
     const fresh = new Y.Doc(); const persisted = await db.file.findUniqueOrThrow({ where: { id: file.id } });
     Y.applyUpdate(fresh, persisted.state!); expect(fresh.getText('code').toString()).toBe(persisted.content); fresh.destroy();
+    const logout = await fetch(`http://localhost:${port}/api/auth/logout`, { method: 'POST', headers: { Cookie: cookie, Origin: config.WEB_ORIGIN } }); expect(logout.status).toBe(204);
+    const login = await fetch(`http://localhost:${port}/api/auth/login`, { method: 'POST', headers: { Origin: config.WEB_ORIGIN, 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: 'Phase5-test-password' }) }); expect(login.status).toBe(200);
+    const loggedInHistory = await fetch(`http://localhost:${port}/api/workspaces/${workspaceId}/messages`, { headers: { Cookie: login.headers.get('set-cookie')!.split(';')[0] } }); expect(await loggedInHistory.json()).toEqual([chatMessage]);
+
   } finally {
     socket?.disconnect(); if (child && child.exitCode === null) { child.kill(); await once(child, 'exit'); }
     if (workspaceId) await db.workspace.deleteMany({ where: { id: workspaceId } });

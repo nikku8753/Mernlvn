@@ -16,5 +16,5 @@ export default async function WorkspacePage({ params }: { params: Promise<{ id: 
   if (response.status === 404) notFound();
   if (response.status === 403) return <WorkspaceUnavailable title="Workspace access denied." message="Your account does not have access to this workspace." />;
   if (!response.ok) throw new Error('Unable to load workspace. Please try again.');
-  return <WorkspaceView initialWorkspace={await response.json()} username={user.username} />;
+  return <WorkspaceView initialWorkspace={await response.json()} username={user.username} userId={user.id} />;
 }

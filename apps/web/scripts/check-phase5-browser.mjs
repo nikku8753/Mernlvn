@@ -1,4 +1,4 @@
-// Phase 5 regressions plus Phase 6: isolated Chromium sessions exercise real Monaco,
+// Phase 5 regressions plus Phases 6?7: isolated Chromium sessions exercise real Monaco,
 // Yjs, Socket.IO, presence, cursor/selection decorations and PostgreSQL.
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile } from 'node:fs/promises';
@@ -41,7 +41,7 @@ async function browser(cookie, url) {
   };
   const wait = async (fn, description, ...args) => { for (let n = 0; n < 240; n++) { try { if (await evaluate(fn, ...args)) return; } catch {} await delay(150); } throw new Error(`Timed out: ${description}; page: ${await evaluate(() => document.body.innerText)}; browser errors: ${errors.slice(0, 2).join('; ')}`); };
   const click = async selector => { await wait(selector => { const element = document.querySelector(selector); return element && !element.disabled; }, selector, selector); await evaluate(selector => document.querySelector(selector).click(), selector); };
-  const field = async (selector, value) => evaluate((selector, value) => { const input = document.querySelector(selector); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true })); }, selector, value);
+  const field = async (selector, value) => evaluate((selector, value) => { const input = document.querySelector(selector); Object.getOwnPropertyDescriptor(input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 'value').set.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true })); }, selector, value);
   const content = () => evaluate(() => new Promise(resolve => window.require(['vs/editor/editor.main'], monaco => resolve(monaco.editor.getModels()[0]?.getValue()))));
   const insert = (text, beginning = false) => evaluate((text, beginning) => new Promise(resolve => window.require(['vs/editor/editor.main'], monaco => {
     const model = monaco.editor.getModels()[0]; const position = model.getPositionAt(beginning ? 0 : model.getValueLength());
@@ -68,14 +68,32 @@ try {
   const url = `http://localhost:3000/workspace/${workspaceId}?file=${file.id}`;
   const a = await browser(users[0].cookie, url); sessions.push(a);
   const b = await browser(users[1].cookie, url); sessions.push(b);
-  const connected = page => page.wait(() => document.body.innerText.includes('Connected') && !!document.querySelector('.monaco-editor'), 'Monaco collaboration connected');
+  const connected = page => page.wait(() => document.querySelector('.editor-status')?.textContent.includes('Connected') && !!document.querySelector('.monaco-editor'), 'Monaco collaboration connected');
   await Promise.all([connected(a), connected(b)]);
   const presence = async (page, name) => page.wait(name => [...document.querySelectorAll('.collaborator-chip')].some(node => node.textContent === name) && document.querySelector('.file-collaborators')?.textContent.includes('Collaborators (1)'), 'one other authenticated collaborator', name);
   await presence(a, users[1].body.username); await presence(b, users[0].body.username);
+  const chatReady = page => page.wait(() => document.querySelector('.workspace-chat [role="status"]')?.textContent === 'Connected', 'chat subscribed and history loaded');
+  const sendChat = async (page, text) => { await chatReady(page); await page.field('#chat-message', text); await page.click('.chat-compose button'); };
+  const chatContains = (page, text, count = 1) => page.wait((text, count) => [...document.querySelectorAll('.chat-message p')].filter(node => node.textContent === text).length === count, 'chat message exactly once', text, count);
+  await Promise.all([chatReady(a), chatReady(b)]);
+  await sendChat(a, 'Phase 7 A to B <script>window.chatXss=1</script>');
+  await chatContains(b, 'Phase 7 A to B <script>window.chatXss=1</script>');
+  assert.equal(await b.evaluate(() => window.chatXss), undefined);
+  await b.field('#chat-message', 'Phase 7 B via Enter');
+  await b.evaluate(() => document.querySelector('#chat-message').focus());
+  await b.cdp('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await b.cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await chatContains(a, 'Phase 7 B via Enter'); await chatContains(b, 'Phase 7 B via Enter');
+  assert.ok(await a.evaluate(() => !!document.querySelector('.chat-message-own')));
+  console.log('PASS: Phase 7 bidirectional chat, Enter, sender styling, text-only rendering and no duplicates');
+
   await a.insert('const a = 1;\n'); await b.wait(() => new Promise(resolve => window.require(['vs/editor/editor.main'], m => resolve(m.editor.getModels()[0].getValue().includes('const a = 1;')))), 'A to B');
   await b.insert('const b = 2;\n'); await a.wait(() => new Promise(resolve => window.require(['vs/editor/editor.main'], m => resolve(m.editor.getModels()[0].getValue().includes('const b = 2;')))), 'B to A');
-  await Promise.all([a.insert('// beginning A\n', true), b.insert('// ending B\n')]); await delay(600);
-  const expected = await a.content(); assert.equal(await b.content(), expected); assert.ok(expected.includes('// beginning A')); assert.ok(expected.includes('// ending B'));
+  await Promise.all([a.insert('// beginning A\n', true), b.insert('// ending B\n')]);
+  await a.wait(() => new Promise(resolve => window.require(['vs/editor/editor.main'], m => { const text = m.editor.getModels()[0].getValue(); resolve(text.includes('// beginning A') && text.includes('// ending B')); })), 'both concurrent edits reach A');
+  const expected = await a.content();
+  await b.wait(value => new Promise(resolve => window.require(['vs/editor/editor.main'], m => resolve(m.editor.getModels()[0].getValue() === value))), 'concurrent edits converge at B', expected);
+  assert.equal(await b.content(), expected); assert.ok(expected.includes('// beginning A')); assert.ok(expected.includes('// ending B'));
   console.log('PASS: two authenticated Monaco bindings, bidirectional and concurrent convergence');
   const select = (page, start, end = start) => page.evaluate((start, end) => new Promise(resolve => window.require(['vs/editor/editor.main'], m => {
     const editor = m.editor.getEditors()[0]; const model = editor.getModel(); const a = model.getPositionAt(start); const b = model.getPositionAt(end);
@@ -112,14 +130,19 @@ try {
   await a.wait(() => document.querySelector('.editor-filename')?.textContent === 'other.ts', 'file switch');
   await b.wait(() => document.querySelector('.file-collaborators')?.textContent.includes('Collaborators (0)') && !document.querySelector('.remote-cursor-label'), 'file switch removes presence and decorations');
   await b.insert('// main only\n'); await delay(300); assert.equal(await a.content(), '');
-  console.log('PASS: rename preserves binding and file switching isolates documents');
+  await sendChat(a, 'Phase 7 across different files'); await chatContains(b, 'Phase 7 across different files');
+  await sendChat(b, 'Phase 7 reply across different files'); await chatContains(a, 'Phase 7 reply across different files');
+  console.log('PASS: rename preserves binding, file switching isolates documents and workspace chat stays connected');
   await b.cdp('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 });
   await b.wait(() => /Offline|Reconnecting/.test(document.body.innerText), 'offline indicator'); await b.insert('// offline retained\n');
   assert.ok((await b.content()).includes('// offline retained'), 'Offline draft is editable before reconnect');
+  await sendChat(a, 'Phase 7 missed while offline');
   await b.cdp('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }); await connected(b);
   await delay(2000); assert.ok((await b.content()).includes('// offline retained'));
   assert.equal((await db.file.findUniqueOrThrow({ where: { id: file.id } })).content, await b.content());
-  console.log('PASS: offline edits replay and persist after reconnect');
+  await chatReady(b); await chatContains(b, 'Phase 7 missed while offline');
+  await chatContains(b, 'Phase 7 across different files');
+  console.log('PASS: offline edits replay and chat history catches up without duplicates after reconnect');
   await a.evaluate(() => Array.from(document.querySelectorAll('.file-select')).find(button => button.textContent.trim().startsWith('renamed.ts')).click()); await connected(a);
   await presence(a, users[1].body.username); await select(b, 2, 7); await remoteRange(a, 2, 7);
   const bTab = await browser(users[1].cookie, url); sessions.push(bTab); await connected(bTab); await presence(a, users[1].body.username);
@@ -146,10 +169,11 @@ try {
   console.log('PASS: Phase 6 multi-line cursors on LF snapshots in Windows Monaco, without content mutation');
   await presence(a, users[1].body.username); await select(bReopened, 2, 7); await remoteRange(a, 2, 7);
   const c = await browser(users[2].cookie, url); sessions.push(c);
-  await c.wait(() => /access|permission|unavailable/i.test(document.body.innerText), 'unauthorized workspace'); assert.ok(!await c.evaluate(() => !!document.querySelector('.monaco-editor')));
+  await c.wait(() => /access|permission|unavailable/i.test(document.body.innerText), 'unauthorized workspace'); assert.ok(!await c.evaluate(() => !!document.querySelector('.monaco-editor'))); assert.ok(!await c.evaluate(() => !!document.querySelector('.workspace-chat')));
   await a.click('[aria-label="Delete renamed.ts"]'); await a.click('.file-operation button');
   await bReopened.wait(() => document.body.innerText.includes('This file was deleted.') && !document.querySelector('.monaco-editor') && !document.querySelector('.remote-cursor-label') && !document.querySelector('.file-collaborators'), 'remote deletion');
   assert.equal(await db.file.count({ where: { id: file.id } }), 0);
+  await sendChat(bReopened, 'Phase 7 chat after file deletion'); await chatContains(a, 'Phase 7 chat after file deletion');
   await a.cdp('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }); assert.ok(await a.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
   await a.cdp('Emulation.clearDeviceMetricsOverride');
   await a.click('a[href="/dashboard"]'); await a.wait(() => location.pathname === '/dashboard', 'dashboard');
