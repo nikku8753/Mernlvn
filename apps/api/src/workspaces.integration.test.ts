@@ -86,6 +86,9 @@ test('workspace CRUD, validation, permissions, PostgreSQL persistence and cascad
   expect((await a.get(path)).body.name).toBe(renamed);
   expect((await db.workspace.findUniqueOrThrow({ where: { id } })).name).toBe(renamed);
   expect(await (await fetch(`${config.WEB_ORIGIN}/workspace/${id}`, { headers: { Cookie: cookieA } })).text()).toContain(renamed);
+  const persistentFile = await a.post(`/api/workspaces/${id}/files`).set('Origin', config.WEB_ORIGIN).send({ name: 'persistent.ts' });
+  expect(persistentFile.status).toBe(201);
+  expect((await a.post(`/api/files/${persistentFile.body.id}/save`).set('Origin', config.WEB_ORIGIN).send({ content: 'const persistent = true;\n', updatedAt: persistentFile.body.updatedAt })).status).toBe(200);
   expect((await a.post('/api/auth/logout').set('Origin', config.WEB_ORIGIN)).status).toBe(204);
   expect((await a.get(path)).status).toBe(401);
   expect((await a.post('/api/auth/login').set('Origin', config.WEB_ORIGIN).send({ email: emailA, password })).status).toBe(200);
@@ -114,6 +117,8 @@ test('workspace CRUD, validation, permissions, PostgreSQL persistence and cascad
   child!.kill(); await once(child!, 'exit'); await start();
   const persisted = await fetch(`${restartedApi}${path}`, { headers: { Cookie: restartCookie } });
   expect(persisted.status).toBe(200); expect((await persisted.json()).name).toBe(renamed);
+  const persistedFile = await fetch(`${restartedApi}/api/files/${persistentFile.body.id}`, { headers: { Cookie: restartCookie } });
+  expect(persistedFile.status).toBe(200); expect((await persistedFile.json()).content).toBe('const persistent = true;\n');
   child!.kill(); await once(child!, 'exit'); child = undefined;
 
   // Existing relation fixtures verify cascade deletion without exposing later-phase CRUD UI.

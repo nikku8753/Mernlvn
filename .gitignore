@@ -5,4 +5,5 @@ dist/
 .env.local
 *.tsbuildinfo
 coverage/
+apps/web/public/monaco/
 .npm-cache/
