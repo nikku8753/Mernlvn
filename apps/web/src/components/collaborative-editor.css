@@ -1,5 +1,9 @@
 .collaborative-editor{height:100%;display:flex;flex-direction:column;min-width:0}
 .collaborative-editor-monaco{flex:1;min-height:0}
+.execution-panel{flex-shrink:0;max-height:45%;overflow:auto;border-top:1px solid var(--line);padding:10px 16px;background:#0c121a;font-size:12px;min-width:0}
+.execution-heading{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.execution-heading h2{display:flex;align-items:center;gap:7px;margin:0;font-size:13px}.execution-heading>span{flex:1;overflow-wrap:anywhere}
+.execution-note{line-height:1.6;margin:10px 0 0}.execution-input{margin-top:10px}.execution-input summary{cursor:pointer;color:var(--muted)}.execution-input textarea{display:block;width:100%;resize:vertical;margin-top:8px;padding:8px;border:1px solid var(--line);border-radius:6px;background:#080d14;color:var(--text);font:12px/1.5 Consolas,monospace;max-height:100px}.execution-input textarea:focus-visible{outline:2px solid var(--mint);outline-offset:2px}
+.execution-output{margin-top:10px}.execution-result{margin:0;font-weight:600}.execution-ok{color:var(--green)}.execution-failed{color:#ffb7b7}.execution-output h3{font-size:11px;color:var(--muted);margin:10px 0 5px}.execution-output pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;margin:0;padding:8px;border:1px solid var(--line);border-radius:5px;background:#080d14;font:12px/1.5 Consolas,monospace}.execution-panel .form-error{margin-top:10px}
 .file-collaborators{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:11px;color:#b6c2ce;max-height:90px;overflow:auto}
 .collaborator-chip{display:inline-flex;align-items:center;gap:6px;overflow-wrap:anywhere}
 .collaborator-chip i{height:6px;width:6px;border-radius:50%;flex-shrink:0}

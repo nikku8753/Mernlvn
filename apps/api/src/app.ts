@@ -13,8 +13,8 @@ import { HttpError,membership } from './permissions.js';
 import { registerSchema,loginSchema,profileSchema,workspaceSchema,workspaceIdSchema } from './validation.js';
 import { io,revokeAccess,broadcastChat } from './realtime.js';
 import { messageHistory, persistMessage } from './chat.js';
-import { loadDocument,discardDocuments,documentOperation } from './documents.js';
-import { execute } from './execution.js';
+import { discardDocuments,documentOperation } from './documents.js';
+import { executionRoutes } from './execution-routes.js';
 import { fileRoutes } from './files.js';
 import { memberRoutes } from './members.js';
 export function createApp() {
@@ -43,7 +43,7 @@ export function createApp() {
   app.use('/api',fileRoutes());
   app.get('/api/workspaces/:id/messages',async(req,res)=>{res.json(await messageHistory(String(req.params.id),req.user.id,req.query));});
   app.post('/api/workspaces/:id/messages',async(req,res)=>{const message=await documentOperation(async()=>{const saved=await persistMessage(String(req.params.id),req.user.id,req.body);await broadcastChat(saved);return saved;});res.status(201).json(message);});
-  app.post('/api/files/:id/run',rateLimit({windowMs:60_000,limit:10}),async(req,res)=>{const id=String(req.params.id);const file=await db.file.findUnique({where:{id}});if(!file||file.type!=='FILE')throw new HttpError(404,'File not found.');await membership(file.workspaceId,req.user.id);const {stdin}=z.object({stdin:z.string().max(4000).default('')}).parse(req.body);const workspace=await db.workspace.findUniqueOrThrow({where:{id:file.workspaceId}});const item=await loadDocument(id);res.json(await execute(workspace.language,item.doc.getText('code').toString(),stdin));});
+  app.use('/api',executionRoutes());
   app.use((_req,res)=>{res.status(404).json({error:'Endpoint not found.'});});
   app.use((error:unknown,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{
     if(error instanceof Error && 'type' in error && error.type==='entity.too.large'){res.status(413).json({error:'Request is too large. File content is limited to 200 KB.'});return;}
